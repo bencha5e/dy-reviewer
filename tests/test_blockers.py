@@ -68,6 +68,17 @@ EXPECTED = {
         "CHK_DY_BASIS": PASS,
         "CHK_DY_CONSISTENCY": PASS,
     },
+    # Lydian inherits the same template as Strada, inverted vacancy branch
+    # included (`M25 = 5%-(1-I16)`), but applied the insurance MAX correctly.
+    # Its real defect - applicant and pending-renewal rent in GPR - is a HIGH
+    # finding covered in test_lydian.py.
+    "Lydian": {
+        "CHK_TAX_MAX": PASS,
+        "CHK_INS_MAX": PASS,
+        "CHK_VACANCY_SIGN": FLAG,
+        "CHK_DY_BASIS": PASS,
+        "CHK_DY_CONSISTENCY": PASS,
+    },
 }
 
 
@@ -108,8 +119,9 @@ def test_blocker_statuses_match_q1_2026_findings(results, loan):
     assert actual == EXPECTED[loan]
 
 
-def test_exactly_five_blocker_flags_across_the_portfolio(results):
-    # S-1, S-3, H-4, A-2, plus Ares's boundary defect - no more, no fewer.
+def test_exactly_six_blocker_flags_across_the_portfolio(results):
+    # S-1, S-3, H-4, A-2, Ares's boundary defect, and Lydian's inherited
+    # vacancy sign - no more, no fewer.
     flagged = {
         (loan, f.check_id)
         for loan, findings in results.items()
@@ -121,6 +133,7 @@ def test_exactly_five_blocker_flags_across_the_portfolio(results):
         ("Strada", "CHK_VACANCY_SIGN"),
         ("Hialeah", "CHK_DY_CONSISTENCY"),
         ("Ares55thAve", "CHK_INS_MAX"),
+        ("Lydian", "CHK_VACANCY_SIGN"),
         ("Ares55thAve", "CHK_VACANCY_SIGN"),
     }
 
@@ -268,6 +281,7 @@ def test_dy_basis_records_the_upb_reference_for_the_standing_flag(contexts):
         "Campus at Villa La Jolla": ("Comm OSAR", "E6"),
         "Hialeah": ("(New) Comm OSAR", "E6"),
         "Ares55thAve": ("Comm OSAR", "D6"),
+        "Lydian": ("NEW OSAR", "E6"),
     }
     for loan, ref in expected.items():
         ctx = contexts[loan]

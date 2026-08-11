@@ -56,10 +56,34 @@ than rebuilt.
 | Severity | Checks |
 |---|---|
 | BLOCKER | tax MAX, insurance MAX, vacancy sign, DY basis, DY consistency |
-| HIGH | vacancy floor, double-counted vacancy, period tie-out, reserve rate, management-fee base, other-income basis, exclusions, month count, GPR and vacancy recompute |
+| HIGH | vacancy floor, double-counted vacancy, period tie-out, reserve rate, management-fee base, other-income basis, exclusions, month count, GPR and vacancy recompute, rent-status inclusion, prior-quarter GPR trend, revenue double-count |
 | MEDIUM | external references, link targets, reference-column source, unit/SF tie, duplicate tabs |
 | LOW | cached error cells, hardcoded plugs, short-history annualisers |
 | STANDING | UPB confirmation — emitted every run |
+
+Three of the HIGH checks exist because a workbook once sailed through review
+with $572,580/yr of phantom rent (the Lydian fixture, now part of the
+acceptance suite):
+
+- **The GPR recompute traces to tenant rows, never to summary blocks.** A rent
+  roll that wraps its per-status `SUMIF`s inside a `SUM` used to stop the trace
+  at the block — re-summing the model's own subtotals and proving nothing. The
+  trace now expands small formula-bearing ranges down to the tenant rows and
+  rebuilds rent from occupied-status rows only.
+- **Rent-status inclusion.** Rows whose status is Vacant, Applicant, or
+  Pending must not contribute rent: an applicant hasn't moved in, and a
+  pending-renewal row duplicates a unit already counted as Occupied, so its
+  rent lands twice. Rows marked `VACANT` (by status or by tenant name) must
+  carry zero rent outright.
+- **Prior-quarter trend.** GPR ÷ occupancy — rent per occupied unit — is
+  compared against the prior DY test in column G and flags beyond a 5% move.
+  Genuine leasing shifts this number slowly; phantom rent moves it instantly
+  (Lydian: +11.9% in one quarter).
+
+A fourth, the revenue double-count check, verifies no source cell enters two
+revenue lines with the same sign and no concession-labelled deduction is taken
+twice — deliberate netting (a parking row added to Parking and subtracted from
+Other Income) stays silent.
 
 Findings carry one of four statuses. `MANUAL_REVIEW` and `UNVERIFIABLE` exist so
 that a check the tool could not complete never reads as a clean pass — a rent

@@ -91,12 +91,23 @@ def _header_text(ctx: LoanContext, sheet: str, column: str, first_row: int) -> s
     return " ".join(parts)
 
 
+#: A referenced range no bigger than this whose cells are themselves formulas is
+#: treated as a summary block and its member formulas are followed. Tenant data
+#: ranges run to hundreds of rows and are never expanded.
+_SUMMARY_BLOCK_LIMIT = 40
+
+
 def _candidate_ranges(ctx: LoanContext, sheet: str, start_sheet: str, formula: str | None,
                       depth: int = 0) -> list[F.Ref]:
     """Ranges on the rent-roll sheet reachable from a formula.
 
-    Strada's GPR reaches its tenant rows through a summary block of `SUMIF`s, so
-    the search follows single-cell references on the rent roll one more hop.
+    Strada's GPR reaches its tenant rows through a summary block of `SUMIF`s
+    referenced cell by cell (`M540-M532-M537-M536`), so the search follows
+    single-cell references on the rent roll one more hop. Lydian wraps the same
+    block in a range (`SUM(G251:G257)` of per-status `SUMIF`s), which would stop
+    the walk at the block itself - re-summing the model's own subtotals and
+    proving nothing - so members of a small formula-bearing range are followed
+    too, down to the tenant rows the block aggregates.
     """
     if not formula or depth > 3:
         return []
@@ -107,6 +118,12 @@ def _candidate_ranges(ctx: LoanContext, sheet: str, start_sheet: str, formula: s
             continue
         if ref.is_range:
             found.append(ref)
+            for member_sheet, member in F.expand_range(ref, sheet, _SUMMARY_BLOCK_LIMIT):
+                member_formula = ctx.wb.formula(member_sheet, member)
+                if member_formula:
+                    found.extend(
+                        _candidate_ranges(ctx, sheet, sheet, member_formula, depth + 1)
+                    )
         else:
             found.extend(
                 _candidate_ranges(ctx, sheet, sheet, ctx.wb.formula(sheet, ref.coord), depth + 1)
@@ -132,6 +149,11 @@ def parse_rent_roll(ctx: LoanContext) -> RentRollParse:
     res = F.resolve_defining_formula(wb, tab.sheet, gpr_coord)
 
     ranges = _candidate_ranges(ctx, sheet, res.sheet, res.formula)
+    # The same tenant range is reachable through several summary cells; keep one.
+    unique: dict[str, F.Ref] = {}
+    for ref in ranges:
+        unique.setdefault(ref.body.replace("$", "").upper(), ref)
+    ranges = list(unique.values())
     # A pass-through that lands directly on a rent-roll cell (Ares: SUM(RR!J8))
     # leaves no range; treat the landing cell's column as the rent column.
     if not ranges and res.sheet == sheet:
@@ -352,6 +374,214 @@ def check_gpr_recompute(ctx: LoanContext) -> list[Finding]:
     ]
 
 
+# A status that must never contribute rent: the unit is empty, or the person
+# named has not taken occupancy (a pending applicant, an unsigned renewal). A
+# "Pending renewal" row in particular duplicates a unit that already appears as
+# Occupied, so counting its rent counts the unit twice.
+_VACANT_MARKER = re.compile(r"^vacant(\s*-?\s*\w+)?\s*$", re.I)
+_NOT_IN_OCCUPANCY = re.compile(r"vacant|applicant|pending|future|model|down", re.I)
+
+
+def _tenant_header_row(parse: RentRollParse) -> int:
+    return min(parse.rows) - 1 if parse.rows else 0
+
+
+def _find_unit_column(ctx: LoanContext, parse: RentRollParse) -> str | None:
+    """The column headed `Unit` (not `Unit Designation` / `Unit/Lease Status`)."""
+    header_row = _tenant_header_row(parse)
+    if not parse.sheet or header_row < 1:
+        return None
+    for row in (header_row, header_row - 1):
+        if row < 1:
+            continue
+        for index in range(1, 41):
+            column = get_column_letter(index)
+            text = ctx.wb.text(parse.sheet, f"{column}{row}")
+            if text and re.fullmatch(r"unit(\(s\))?\s*#?|suite\s*(id)?", text.strip(), re.I):
+                return column
+    return None
+
+
+def _vacant_marked_rows(ctx: LoanContext, parse: RentRollParse) -> dict[int, str]:
+    """Rows whose status or name cell reads as a bare `VACANT` marker.
+
+    The marker must be the whole cell (`Vacant`, `VACANT`, `Vacant-Leased`), so a
+    summary caption like `Vacant Sqft:` on Hialeah never marks a tenant row.
+    """
+    marked: dict[int, str] = {}
+    if not parse.sheet or not parse.rows:
+        return marked
+    rent_index = column_index_from_string(parse.rent_column) if parse.rent_column else 30
+    for index in range(1, rent_index + 2):
+        column = get_column_letter(index)
+        for row in parse.rows:
+            text = ctx.wb.text(parse.sheet, f"{column}{row}")
+            if text and _VACANT_MARKER.match(text.strip()):
+                marked.setdefault(row, f"{column}{row}={text.strip()!r}")
+    return marked
+
+
+def check_rent_status(ctx: LoanContext) -> list[Finding]:
+    """No rent from units that are vacant, pending, or counted twice.
+
+    Two legs, both driven off the same tenant-level parse as the GPR recompute:
+
+    - a row marked `VACANT` (by status or by name) must carry zero rent;
+    - the model's GPR must not exceed the occupied-status rent total - the
+      excess is rent picked up from Applicant / Pending / Vacant rows, which the
+      loan definitions exclude (a pending row also duplicates a unit already
+      counted as occupied, so the same unit's rent lands twice).
+    """
+    wb, tab = ctx.wb, ctx.tab
+    coord = tab.cell(Line.GPR)
+    parse = ctx.facts.get("rent_roll_parse")
+    if parse is None or coord is None:
+        return []
+    if not parse.confident:
+        return []  # the GPR recompute already reported MANUAL_REVIEW
+
+    findings: list[Finding] = []
+    scale = 12.0 if parse.monthly else 1.0
+
+    # Leg 1: vacant-marked rows carrying rent.
+    vacant_rows = _vacant_marked_rows(ctx, parse)
+    vacant_with_rent = {
+        row: marker
+        for row, marker in vacant_rows.items()
+        if abs(parse.values.get(row, 0.0)) > 1.0
+    }
+    if vacant_with_rent:
+        sample = "; ".join(
+            f"row {row} ({marker}) rent {parse.values[row]:,.0f}"
+            for row, marker in sorted(vacant_with_rent.items())[:6]
+        )
+        total = sum(parse.values[r] for r in vacant_with_rent) * scale
+        findings.append(
+            Finding(
+                "CHK_RENT_STATUS",
+                Severity.HIGH,
+                Status.FLAG,
+                f"{len(vacant_with_rent)} row(s) marked VACANT on {parse.sheet!r} carry rent in "
+                f"column {parse.rent_column} ({total:,.0f} annualized). A vacant unit must not "
+                f"pick up rent.",
+                sheet=parse.sheet,
+                cell=f"{parse.rent_column}{min(vacant_with_rent)}",
+                evidence=sample,
+                on_dy_path=True,
+            )
+        )
+
+    # Leg 2: rent from non-occupied statuses reaching the model's GPR.
+    if parse.statuses:
+        model_gpr = wb.number(tab.sheet, coord)
+        included_rows = set(parse.included_rows())
+        included_total = sum(parse.values[r] for r in included_rows)
+
+        excluded: dict[str, tuple[int, float]] = {}
+        excluded_rows: list[int] = []
+        for row, status in sorted(parse.statuses.items()):
+            if row in included_rows or row not in parse.values:
+                continue
+            rent = parse.values[row]
+            if abs(rent) <= 1.0:
+                continue
+            count, total = excluded.get(status, (0, 0.0))
+            excluded[status] = (count + 1, total + rent)
+            excluded_rows.append(row)
+        excluded_total = sum(total for _n, total in excluded.values())
+
+        unit_column = _find_unit_column(ctx, parse)
+        duplicated = 0
+        if unit_column and excluded_rows:
+            included_units = {
+                ctx.wb.value(parse.sheet, f"{unit_column}{r}") for r in included_rows
+            }
+            included_units.discard(None)
+            duplicated = sum(
+                1
+                for r in excluded_rows
+                if ctx.wb.value(parse.sheet, f"{unit_column}{r}") in included_units
+            )
+
+        breakdown = "; ".join(
+            f"{status!r}: {count} row(s), {total * scale:,.0f} annualized"
+            for status, (count, total) in sorted(excluded.items())
+        )
+        dup_note = (
+            f" {duplicated} of these rows share a unit with a row already counted as occupied, "
+            f"so those units' rent is in the total twice."
+            if duplicated
+            else ""
+        )
+
+        if model_gpr is not None:
+            gap = model_gpr - included_total * scale
+            explained = excluded_total * scale
+            if gap > max(1.0, abs(model_gpr) * REVENUE_TOLERANCE):
+                if explained > 0 and gap >= 0.5 * explained:
+                    findings.append(
+                        Finding(
+                            "CHK_RENT_STATUS",
+                            Severity.HIGH,
+                            Status.FLAG,
+                            f"Gross potential rent includes {gap:,.0f} of rent from rows whose "
+                            f"status says the tenant is not in occupancy ({breakdown}). The loan "
+                            f"definitions count rent only from tenants in place, and the rent "
+                            f"roll's own unit count excludes these rows.{dup_note}",
+                            sheet=tab.sheet,
+                            cell=coord,
+                            evidence=(
+                                f"model GPR {model_gpr:,.2f} vs occupied-status rent "
+                                f"{included_total * scale:,.2f} ({len(included_rows)} row(s), "
+                                f"status column {parse.status_column})"
+                            ),
+                            on_dy_path=True,
+                        )
+                    )
+                else:
+                    findings.append(
+                        Finding(
+                            "CHK_RENT_STATUS",
+                            Severity.HIGH,
+                            Status.MANUAL_REVIEW,
+                            f"The model's GPR exceeds the occupied-status rent total by "
+                            f"{gap:,.0f}, which rent on non-occupied rows does not explain "
+                            f"({breakdown or 'no rent on non-occupied rows'}). Trace the "
+                            f"difference by hand.",
+                            sheet=tab.sheet,
+                            cell=coord,
+                            evidence=(
+                                f"model GPR {model_gpr:,.2f} vs occupied-status rent "
+                                f"{included_total * scale:,.2f}"
+                            ),
+                            on_dy_path=True,
+                        )
+                    )
+            elif not vacant_with_rent:
+                detail = (
+                    f"rent on non-occupied rows is correctly excluded ({breakdown})"
+                    if excluded
+                    else "no rent sits on any non-occupied row"
+                )
+                findings.append(
+                    Finding(
+                        "CHK_RENT_STATUS",
+                        Severity.HIGH,
+                        Status.PASS,
+                        f"Gross potential rent draws only on occupied-status rows: {detail}.",
+                        sheet=tab.sheet,
+                        cell=coord,
+                        evidence=(
+                            f"model GPR {model_gpr:,.2f} = occupied-status rent over "
+                            f"{len(included_rows)} row(s), status column {parse.status_column}"
+                        ),
+                        on_dy_path=True,
+                    )
+                )
+
+    return findings
+
+
 def check_vacancy_recompute(ctx: LoanContext) -> list[Finding]:
     """Rebuild the vacancy line from occupancy and the agreement's floor."""
     wb, tab, params = ctx.wb, ctx.tab, ctx.params
@@ -445,7 +675,9 @@ def check_vacancy_recompute(ctx: LoanContext) -> list[Finding]:
     ]
 
 
-RECOMPUTE_CHECKS = (check_gpr_recompute, check_vacancy_recompute)
+#: `check_rent_status` reads the parse that `check_gpr_recompute` stores, so it
+#: must run after it.
+RECOMPUTE_CHECKS = (check_gpr_recompute, check_rent_status, check_vacancy_recompute)
 
 
 def run_recompute(ctx: LoanContext) -> list[Finding]:

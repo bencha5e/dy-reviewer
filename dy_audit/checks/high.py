@@ -992,6 +992,335 @@ def _check_recovery_placement(ctx: LoanContext) -> list[Finding]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# CHK_GPR_TREND - sanity check against the prior quarter's DY test (column G)
+# ---------------------------------------------------------------------------
+
+#: Rent per occupied unit rarely moves this much in one quarter. Q1 2026
+#: actuals: Strada -0.07%, Campus -1.64%, Hialeah +3.44%, Ares 0.00% - and
+#: Lydian, whose GPR wrongly includes applicant and pending-renewal rent, jumps
+#: +11.94%.
+TREND_TOLERANCE = 0.05
+
+
+def check_gpr_trend(ctx: LoanContext) -> list[Finding]:
+    """GPR per occupied unit must be in line with the prior DY test.
+
+    The prior quarter's DY test always sits in column G, with its occupancy on
+    the same rows. Comparing `GPR / occupancy` across the two quarters gives
+    rent per occupied unit (the unit count cancels), which is the number an
+    inflated rent roll cannot hide: adding rent for units that are not occupied
+    raises it immediately, while genuine leasing moves it only slowly.
+    """
+    wb, tab = ctx.wb, ctx.tab
+    gpr_row = tab.rows.get(Line.GPR)
+    occ_row = tab.rows.get(Line.OCCUPANCY)
+    if gpr_row is None or occ_row is None:
+        return []
+    coord = f"{tab.dy_column}{gpr_row}"
+
+    if tab.dy_column == "G":
+        return [
+            Finding(
+                "CHK_GPR_TREND",
+                Severity.HIGH,
+                Status.UNVERIFIABLE,
+                "The DY-test column is column G itself, so there is no prior DY test to "
+                "compare gross potential rent against.",
+                sheet=tab.sheet,
+                cell=coord,
+            )
+        ]
+
+    current_gpr = wb.number(tab.sheet, coord)
+    prior_gpr = wb.number(tab.sheet, f"G{gpr_row}")
+    current_occ = None
+    for column in (tab.dy_column, "H"):
+        current_occ = wb.number(tab.sheet, f"{column}{occ_row}")
+        if current_occ is not None:
+            break
+    prior_occ = wb.number(tab.sheet, f"G{occ_row}")
+
+    if not prior_gpr or not prior_occ:
+        return [
+            Finding(
+                "CHK_GPR_TREND",
+                Severity.HIGH,
+                Status.UNVERIFIABLE,
+                "Column G holds no prior DY-test GPR and occupancy, so this quarter's rent "
+                "level could not be sanity-checked against last quarter's.",
+                sheet=tab.sheet,
+                cell=f"G{gpr_row}",
+                evidence=f"G{gpr_row}={prior_gpr!r}, G{occ_row}={prior_occ!r}",
+            )
+        ]
+    if not current_gpr or not current_occ:
+        return [
+            Finding(
+                "CHK_GPR_TREND",
+                Severity.HIGH,
+                Status.MANUAL_REVIEW,
+                "This quarter's GPR or occupancy could not be read, so the prior-quarter "
+                "sanity check did not run.",
+                sheet=tab.sheet,
+                cell=coord,
+                on_dy_path=True,
+            )
+        ]
+
+    current_rate = current_gpr / current_occ
+    prior_rate = prior_gpr / prior_occ
+    change = current_rate / prior_rate - 1.0
+
+    # Express both quarters per unit per month when a unit count is available;
+    # the comparison itself never needs it.
+    per_unit = ""
+    nrsf_row = tab.rows.get(Line.NRSF)
+    units = wb.number(tab.sheet, f"E{nrsf_row}") if nrsf_row else None
+    if units:
+        # The CREFC row holds SF for commercial and units for multifamily, so
+        # the figure is "per occupied unit or SF" - the ratio test above never
+        # depends on which.
+        per_unit = (
+            f" ({current_gpr / 12 / (current_occ * units):,.2f} now vs "
+            f"{prior_gpr / 12 / (prior_occ * units):,.2f} last quarter, "
+            f"per occupied unit or SF per month)"
+        )
+
+    evidence = (
+        f"this DY test: GPR {current_gpr:,.0f} at {current_occ:.2%} occupancy; prior DY test "
+        f"(column G): GPR {prior_gpr:,.0f} at {prior_occ:.2%}"
+    )
+
+    if abs(change) > TREND_TOLERANCE:
+        return [
+            Finding(
+                "CHK_GPR_TREND",
+                Severity.HIGH,
+                Status.FLAG,
+                f"Gross potential rent per occupied unit moved {change:+.1%} against the prior "
+                f"DY test{per_unit}, beyond the {TREND_TOLERANCE:.0%} sanity band. Rent does "
+                f"not reprice that fast in one quarter - check what entered the rent roll "
+                f"before accepting the number.",
+                sheet=tab.sheet,
+                cell=coord,
+                evidence=evidence,
+                on_dy_path=True,
+            )
+        ]
+    return [
+        Finding(
+            "CHK_GPR_TREND",
+            Severity.HIGH,
+            Status.PASS,
+            f"Gross potential rent per occupied unit is within {TREND_TOLERANCE:.0%} of the "
+            f"prior DY test ({change:+.1%}){per_unit}.",
+            sheet=tab.sheet,
+            cell=coord,
+            evidence=evidence,
+            on_dy_path=True,
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
+# CHK_REVENUE_DOUBLE_COUNT - no source may feed two revenue lines
+# ---------------------------------------------------------------------------
+
+#: Labels that mark a rent-reduction item. Deducting one of these in more than
+#: one revenue line takes the same dollars out twice.
+_DEDUCTION_LABEL = re.compile(r"concession|free rent", re.I)
+
+#: Leaf cells below this size are rates, dates and counts, not dollars.
+_DOLLAR_FLOOR = 100.0
+
+_LEAF_DEPTH = 5
+_LEAF_RANGE_LIMIT = 60
+
+#: The OSAR revenue lines a source may legitimately feed only once.
+_REVENUE_LINES = (
+    Line.GPR,
+    Line.VACANCY,
+    Line.BASE_RENT,
+    Line.REIMBURSEMENT,
+    Line.PERCENTAGE_RENT,
+    Line.PARKING,
+    Line.OTHER_INCOME,
+)
+
+
+def _column_header(ctx: LoanContext, sheet: str, coord: str) -> str | None:
+    """Text sitting above a cell (same column, then one column left)."""
+    row, col = _row_of(coord), _col_of(coord)
+    if row is None or col is None:
+        return None
+    index = column_index_from_string(col)
+    for column in (col, get_column_letter(index - 1) if index > 1 else col):
+        for up in range(1, 7):
+            if row - up < 1:
+                break
+            text = ctx.wb.text(sheet, f"{column}{row - up}")
+            if text and not _is_number_text(text):
+                return text.strip()
+    return None
+
+
+def _signed_leaves(
+    ctx: LoanContext,
+    sheet: str,
+    coord: str,
+    stop_cells: set[tuple[str, str]],
+    out: dict[tuple[str, str], int],
+    seen: set[tuple[str, str]],
+    sign: int = 1,
+    depth: int = 0,
+) -> None:
+    """Literal dollar cells reachable from a formula, with the sign they enter at.
+
+    References to other OSAR revenue lines are structural (the vacancy line is
+    defined off GPR on every CREFC template) and are not followed. Whole-column
+    and oversized ranges are skipped, mirroring the dependency walker.
+    """
+    key = (sheet, coord)
+    if depth > _LEAF_DEPTH or key in seen:
+        return
+    seen.add(key)
+    wb = ctx.wb
+    formula = wb.formula(sheet, coord)
+    if formula is None:
+        value = wb.number(sheet, coord)
+        if value is not None and abs(value) >= _DOLLAR_FLOOR:
+            out.setdefault(key, sign)
+        return
+    for ref, start, _end in F.iter_refs_positioned(formula):
+        if ref.external_index is not None:
+            continue
+        ref_sign = sign * F.term_sign(formula, start)
+        target_sheet = ref.resolved_sheet(sheet)
+        if not wb.has_sheet(target_sheet):
+            continue
+        if ref.is_range:
+            for cell_sheet, cell in F.expand_range(ref, target_sheet, _LEAF_RANGE_LIMIT):
+                _signed_leaves(ctx, cell_sheet, cell, stop_cells, out, seen, ref_sign, depth + 1)
+            continue
+        if (target_sheet, ref.coord) in stop_cells:
+            continue
+        _signed_leaves(ctx, target_sheet, ref.coord, stop_cells, out, seen, ref_sign, depth + 1)
+
+
+def check_revenue_double_count(ctx: LoanContext) -> list[Finding]:
+    """No source cell may enter two revenue lines with the same sign.
+
+    Netting is legitimate and stays silent: Lydian's Other Income subtracts the
+    parking row its Parking line adds, which is how the same T12 row appears
+    once overall. What flags is the same dollars *adding* into two lines, or a
+    concession/free-rent deduction taken in more than one line.
+    """
+    wb, tab = ctx.wb, ctx.tab
+    line_cells: dict[Line, str] = {}
+    for line in _REVENUE_LINES:
+        coord = tab.cell(line)
+        if coord is None:
+            continue
+        value = wb.number(tab.sheet, coord)
+        if value is not None and abs(value) > 1.0:
+            line_cells[line] = coord
+    if len(line_cells) < 2:
+        return []
+
+    stop_cells = {
+        (tab.sheet, tab.cell(line))
+        for line in list(_REVENUE_LINES) + [Line.EGI]
+        if tab.cell(line) is not None
+    }
+
+    leaves_by_line: dict[Line, dict[tuple[str, str], int]] = {}
+    for line, coord in line_cells.items():
+        out: dict[tuple[str, str], int] = {}
+        _signed_leaves(ctx, tab.sheet, coord, stop_cells - {(tab.sheet, coord)}, out, set())
+        leaves_by_line[line] = out
+
+    findings: list[Finding] = []
+
+    # Same cell entering two lines with the same sign.
+    shared: dict[tuple[str, str], list[Line]] = {}
+    for line, leaves in leaves_by_line.items():
+        for key, sign in leaves.items():
+            others = [
+                other
+                for other, other_leaves in leaves_by_line.items()
+                if other is not line and other_leaves.get(key) == sign
+            ]
+            if others and key not in shared:
+                shared[key] = sorted({line, *others}, key=lambda l: l.value)
+    for (leaf_sheet, leaf_coord), lines in sorted(shared.items()):
+        value = wb.number(leaf_sheet, leaf_coord)
+        label = nearby_label(ctx, leaf_sheet, leaf_coord) or _column_header(
+            ctx, leaf_sheet, leaf_coord
+        )
+        names = " and ".join(line.value for line in lines)
+        findings.append(
+            Finding(
+                "CHK_REVENUE_DOUBLE_COUNT",
+                Severity.HIGH,
+                Status.FLAG,
+                f"{leaf_sheet}!{leaf_coord} ({label or 'unlabelled'}, {value:,.0f}) enters "
+                f"both the {names} lines with the same sign - the same dollars are counted "
+                f"twice in revenue.",
+                sheet=leaf_sheet,
+                cell=leaf_coord,
+                evidence=f"reached from {', '.join(f'{tab.sheet}!{line_cells[l]}' for l in lines)}",
+                on_dy_path=True,
+            )
+        )
+
+    # A concession-labelled deduction taken in more than one line.
+    deduction_lines: dict[tuple[str, str], list[Line]] = {}
+    for line, leaves in leaves_by_line.items():
+        for (leaf_sheet, leaf_coord), sign in leaves.items():
+            if sign >= 0:
+                continue
+            label = nearby_label(ctx, leaf_sheet, leaf_coord) or _column_header(
+                ctx, leaf_sheet, leaf_coord
+            )
+            if label and _DEDUCTION_LABEL.search(label):
+                deduction_lines.setdefault((leaf_sheet, leaf_coord), []).append(line)
+    multi = {
+        key: lines for key, lines in deduction_lines.items() if len(set(lines)) > 1
+    }
+    for (leaf_sheet, leaf_coord), lines in sorted(multi.items()):
+        names = " and ".join(sorted({line.value for line in lines}))
+        findings.append(
+            Finding(
+                "CHK_REVENUE_DOUBLE_COUNT",
+                Severity.HIGH,
+                Status.FLAG,
+                f"The concession at {leaf_sheet}!{leaf_coord} is deducted in more than one "
+                f"revenue line ({names}) - the same concession is taken out twice.",
+                sheet=leaf_sheet,
+                cell=leaf_coord,
+                on_dy_path=True,
+            )
+        )
+
+    if not findings:
+        checked = ", ".join(line.value for line in sorted(line_cells, key=lambda l: l.value))
+        findings.append(
+            Finding(
+                "CHK_REVENUE_DOUBLE_COUNT",
+                Severity.HIGH,
+                Status.PASS,
+                f"No source cell feeds two revenue lines with the same sign, and no "
+                f"concession-labelled deduction is taken in more than one line.",
+                sheet=tab.sheet,
+                cell=tab.cell(Line.GPR),
+                evidence=f"lines checked: {checked}",
+                on_dy_path=True,
+            )
+        )
+    return findings
+
+
 HIGH_CHECKS = (
     check_definitions,
     check_vacancy_floor,
@@ -1001,6 +1330,8 @@ HIGH_CHECKS = (
     check_mgmt_base,
     check_other_income_basis,
     check_exclusions,
+    check_gpr_trend,
+    check_revenue_double_count,
 )
 
 

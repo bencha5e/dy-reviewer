@@ -25,7 +25,7 @@ from dy_audit.runlog import build_summary, write_summary
 from dy_audit.workbook import Workbook
 
 RUN_DATE = dt.date(2026, 8, 11)
-LOANS = {"Strada", "Campus at Villa La Jolla", "Hialeah", "Ares55thAve"}
+LOANS = {"Strada", "Campus at Villa La Jolla", "Hialeah", "Ares55thAve", "Lydian"}
 
 
 @pytest.fixture(scope="module")
@@ -54,6 +54,7 @@ def test_headline_facts_are_collected(audited):
         "Campus at Villa La Jolla": 0.060705295896825412,
         "Hialeah": 0.021506099536749368,
         "Ares55thAve": 0.07088346216872761,
+        "Lydian": 0.06370338683206106,
     }
     for name, dy in expected_dy.items():
         facts = audited[name].facts
@@ -173,7 +174,7 @@ def test_run_log_records_totals_blockers_and_failures(audited, tmp_path):
         results, ["Unpaired model: stray.xlsx"], dt.datetime(2026, 8, 11, 9, 0), tmp_path, tmp_path, True
     )
     assert "# Debt Yield Audit" in text
-    assert "3 succeeded, 1 failed" in text
+    assert "4 succeeded, 1 failed" in text
     assert "left in the input queue" in text
     assert "BadZipFile" in text
     assert "Unpaired model: stray.xlsx" in text
@@ -258,7 +259,7 @@ def test_cli_no_move_leaves_the_input_folder_alone(input_copy):
 
     output = input_copy / "DY Review Output"
     folders = sorted(p.name for p in output.iterdir() if p.is_dir())
-    assert len(folders) == 4
+    assert len(folders) == 5
     assert all("v1" in name for name in folders)
     assert len(list(output.glob("*.md"))) == 1
     for folder in output.iterdir():

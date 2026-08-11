@@ -23,6 +23,9 @@ EXPECTED = {
     "Campus at Villa La Jolla": ("Comm OSAR", "I", "C", ["OSAR"], 0.060705295896825412),
     "Hialeah": ("(New) Comm OSAR", "I", "C", [], 0.021506099536749368),
     "Ares55thAve": ("Comm OSAR", "I", "B", [], 0.07088346216872761),
+    # Lydian carries analyst variance-helper columns (N, O) to the right of the
+    # figures; the DY column must still resolve to I, not to the helpers.
+    "Lydian": ("NEW OSAR", "I", "C", [], 0.06370338683206106),
 }
 
 QUARTER_END = dt.date(2026, 3, 31)

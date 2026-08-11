@@ -221,20 +221,66 @@ def _resolve_rows(labels: dict[int, str]) -> tuple[dict[Line, int], list[str]]:
     return rows, notes
 
 
+#: A debt yield outside this band on the Debt Yield row marks the column as a
+#: variance or helper column rather than the test figure itself.
+_PLAUSIBLE_DY = (0.005, 0.5)
+
+
+def _is_self_row_delta(wb: Workbook, sheet: str, coord: str, row: int) -> bool:
+    """True when a formula only combines other cells on its own row.
+
+    Analysts add helper columns like `N73 = I73-G73` (this quarter vs last) to
+    the right of the figures; such a column carries a formula on the Debt Yield
+    row without being a debt-yield figure, and must not win the rightmost rule.
+    """
+    from . import formula as F  # local import: formula.py is check-layer code
+
+    refs = [r for r in F.iter_refs(wb.formula(sheet, coord)) if not r.is_range]
+    if not refs:
+        return False
+    for ref in refs:
+        m = re.match(r"^[A-Z]+(\d+)$", ref.coord)
+        if ref.sheet is not None or not m or int(m.group(1)) != row:
+            return False
+    return True
+
+
 def _detect_dy_column(wb: Workbook, sheet: str, rows: dict[Line, int]) -> tuple[str, list[str]]:
     """Identify the current DY-test figure column.
 
     Spec section 1 says the current figures live in the rightmost figure column
     (column I in the Q1 2026 set), but the column is derived rather than assumed:
     it is the rightmost figure column carrying a formula on the Debt Yield row.
+    Columns that merely compare other columns on that row, or whose value is not
+    a plausible debt yield, are variance helpers and are passed over.
     """
     notes: list[str] = []
     dy_row = rows.get(Line.DEBT_YIELD)
     candidates: list[str] = []
     if dy_row is not None:
         for col in _FIGURE_COLS:
-            if wb.formula(sheet, f"{col}{dy_row}") is not None:
-                candidates.append(col)
+            if wb.formula(sheet, f"{col}{dy_row}") is None:
+                continue
+            if _is_self_row_delta(wb, sheet, f"{col}{dy_row}", dy_row):
+                notes.append(
+                    f"Column {col} skipped: its Debt Yield formula only compares other "
+                    f"columns on the same row (a variance helper, not a figure)."
+                )
+                continue
+            candidates.append(col)
+        plausible = [
+            col
+            for col in candidates
+            if (value := wb.number(sheet, f"{col}{dy_row}")) is not None
+            and _PLAUSIBLE_DY[0] <= abs(value) <= _PLAUSIBLE_DY[1]
+        ]
+        if plausible and len(plausible) < len(candidates):
+            skipped = [c for c in candidates if c not in plausible]
+            notes.append(
+                f"Column(s) {', '.join(skipped)} skipped: Debt Yield value outside the "
+                f"plausible band, so they read as variance columns."
+            )
+            candidates = plausible
     if not candidates:
         # Fall back to the NCF row, then to the spec's stated default.
         ncf_row = rows.get(Line.NCF)

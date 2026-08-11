@@ -56,10 +56,30 @@ than rebuilt.
 | Severity | Checks |
 |---|---|
 | BLOCKER | tax MAX, insurance MAX, vacancy sign, DY basis, DY consistency |
-| HIGH | vacancy floor, double-counted vacancy, period tie-out, reserve rate, management-fee base, other-income basis, exclusions, month count, GPR and vacancy recompute, rent-status inclusion, prior-quarter GPR trend, revenue double-count |
+| HIGH | vacancy floor, double-counted vacancy, period tie-out, reserve rate, management-fee base, other-income basis, exclusions, month count, GPR and vacancy recompute, rent-status inclusion, prior-quarter GPR trend, revenue double-count, rent-roll rebuild, rent-column edits, export-total tie, supplementary-income-in-GPR |
 | MEDIUM | external references, link targets, reference-column source, unit/SF tie, duplicate tabs |
 | LOW | cached error cells, hardcoded plugs, short-history annualisers |
 | STANDING | UPB confirmation — emitted every run |
+
+**The rent roll is rebuilt from scratch on every run.** The tool finds the
+tenant table by its own headers — never by trusting the model's formulas —
+identifies the tenant-rent column, decides which tenants belong in base rent,
+and writes the whole thing to a **Rent Roll Rebuild** tab in the findings
+workbook: every row, its status, its rent, included or excluded and why. If the
+rebuilt figure doesn't tie to the OSAR's annualized GPR line, the run does a
+second, deeper dive and itemizes the difference — rent on excluded statuses,
+supplementary billing codes inside the base-rent line (the GPR line is base
+rent only), concession deductions, per-row deltas in a derived rent column,
+hand-edited cells, and export totals that no longer match the rows above them.
+Three forensic signals flag even when the headline number ties:
+
+- **a formula cell inside an otherwise-literal exported rent column** that
+  pulls from another period or workbook — last quarter's rent typed over units
+  the export shows producing nothing;
+- **the export's own Total rows disagreeing with the tenant rows above them**
+  — the sheet was edited after export;
+- **the OSAR's note claiming exclusions the formula never applies** ("less
+  delinquent tenants & KV's" beside a plain SUM that excludes nobody).
 
 Three of the HIGH checks exist because a workbook once sailed through review
 with $572,580/yr of phantom rent (the Lydian fixture, now part of the

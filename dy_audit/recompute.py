@@ -192,6 +192,20 @@ def parse_rent_roll(ctx: LoanContext) -> RentRollParse:
         if texts and len(texts) > len(numbers):
             text_ranges.append((ref, texts))
 
+    # A GPR built as SUM over two slices of one column (Quincy sums the
+    # Hollingsworth block and the Quincy block separately) is one tenant range
+    # split in two; offer the union as its own candidate.
+    by_column: dict[str, list[tuple[F.Ref, dict[int, float]]]] = {}
+    for ref, numbers in numeric_ranges:
+        column = re.sub(r"[\d$:]", "", ref.body.split(":")[0]).upper()
+        by_column.setdefault(column, []).append((ref, numbers))
+    for column, members in by_column.items():
+        if len(members) > 1:
+            merged: dict[int, float] = {}
+            for _ref, numbers in members:
+                merged.update(numbers)
+            numeric_ranges.append((members[0][0], merged))
+
     # Resolve the status column before the rent column: on a unit-level rent roll
     # the two must describe the same rows. Strada reaches its tenant rents
     # through a summary block of SUMIFs, so both the tenant range (T7:T517) and

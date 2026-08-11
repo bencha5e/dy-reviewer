@@ -87,9 +87,9 @@ def workbook_for(audited, tmp_path):
     return build
 
 
-def test_findings_workbook_has_the_three_sheets(workbook_for):
+def test_findings_workbook_has_the_four_sheets(workbook_for):
     wb, path = workbook_for("Hialeah")
-    assert wb.sheetnames == ["Summary", "Findings", "Loan Parameters"]
+    assert wb.sheetnames == ["Summary", "Findings", "Rent Roll Rebuild", "Loan Parameters"]
     assert path.exists() and path.stat().st_size > 0
 
 

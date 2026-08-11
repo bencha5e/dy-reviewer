@@ -13,6 +13,7 @@ from .context import LoanContext
 from .definitions import parse_definitions
 from .model import LoanFiles, LoanResult
 from .osar import Line, select_osar
+from .rebuild import run_rebuild
 from .recompute import run_recompute
 from .workbook import Workbook
 
@@ -73,6 +74,9 @@ def audit_loan(files: LoanFiles) -> LoanResult:
             result.add(finding)
         for finding in run_recompute(ctx):
             result.add(finding)
+        # The rebuild reuses the recompute's parse as its fallback, so it runs after.
+        for finding in run_rebuild(ctx):
+            result.add(finding)
         for finding in run_medium(ctx):
             result.add(finding)
         for finding in run_low(ctx):
@@ -82,6 +86,7 @@ def audit_loan(files: LoanFiles) -> LoanResult:
 
         result.facts = collect_facts(ctx)
         result.facts["params"] = ctx.params
+        result.facts["rebuilds"] = ctx.facts.get("rebuilds") or []
     except Exception as exc:  # noqa: BLE001 - one loan's failure must not stop the run
         result.error = f"{type(exc).__name__}: {exc}"
         result.facts["traceback"] = traceback.format_exc()

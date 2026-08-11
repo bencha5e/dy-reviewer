@@ -248,6 +248,152 @@ def _parameters_sheet(sheet, result: LoanResult) -> None:
     sheet.freeze_panes = "A2"
 
 
+_REBUILD_COLUMNS = [
+    ("Row", 7),
+    ("Unit", 12),
+    ("Tenant", 30),
+    ("Status", 18),
+    ("Monthly rent", 13),
+    ("Annualized", 14),
+    ("Included", 10),
+    ("Why", 44),
+    ("Cell is", 20),
+    ("Balance", 11),
+    ("Move-out", 11),
+]
+
+_INCLUDED_FILL = PatternFill("solid", fgColor="D7E8D4")
+_EXCLUDED_FILL = PatternFill("solid", fgColor="F4B6B6")
+_EDIT_FILL = PatternFill("solid", fgColor="FFE699")
+
+
+def _rebuild_sheet(sheet, result: LoanResult) -> None:
+    """The independent rent-roll rebuild: every row, every decision, and the
+    reconciliation against the OSAR when the totals do not tie."""
+    rebuilds = result.facts.get("rebuilds") or []
+    if not rebuilds:
+        sheet.cell(row=1, column=1, value="No rent roll could be rebuilt for this loan.")
+        return
+
+    row_index = 1
+    for rebuild in rebuilds:
+        sheet.cell(
+            row=row_index,
+            column=1,
+            value=f"{rebuild.line.value} rebuilt from {rebuild.sheet!r}",
+        ).font = _TITLE_FONT
+        row_index += 1
+        scale = rebuild.scale
+        header_bits = [
+            f"rent column {rebuild.columns.get('rent', '?')} ({rebuild.rent_header})",
+            "monthly x 12" if rebuild.monthly else "annual",
+            f"source: {rebuild.source}",
+        ]
+        if rebuild.as_of:
+            header_bits.append(rebuild.as_of)
+        sheet.cell(row=row_index, column=1, value="; ".join(header_bits)).alignment = _WRAP
+        sheet.merge_cells(start_row=row_index, start_column=1, end_row=row_index, end_column=8)
+        row_index += 2
+
+        head_row = row_index
+        for index, (title, width) in enumerate(_REBUILD_COLUMNS, start=1):
+            cell = sheet.cell(row=head_row, column=index, value=title)
+            cell.font = _HEADER_FONT
+            cell.fill = _HEADER_FILL
+            column = get_column_letter(index)
+            if width > (sheet.column_dimensions[column].width or 0):
+                sheet.column_dimensions[column].width = width
+        row_index += 1
+
+        for tenant in rebuild.rows:
+            values = [
+                tenant.row,
+                tenant.unit,
+                tenant.name,
+                tenant.status,
+                tenant.monthly_rent if rebuild.monthly else tenant.monthly_rent / 12.0,
+                tenant.monthly_rent * scale,
+                "yes" if tenant.included else "no",
+                tenant.reason,
+                "formula: " + (tenant.rent_formula or "")[:40] if tenant.rent_is_formula else "value",
+                tenant.balance,
+                tenant.move_out.strftime("%m/%d/%Y") if tenant.move_out else None,
+            ]
+            for column_index, value in enumerate(values, start=1):
+                cell = sheet.cell(row=row_index, column=column_index, value=value)
+                cell.border = _BORDER
+                if column_index in (5, 6, 10):
+                    cell.number_format = "#,##0.00"
+                if column_index == 8:
+                    cell.alignment = _WRAP
+            sheet.cell(row=row_index, column=7).fill = (
+                _INCLUDED_FILL if tenant.included else _EXCLUDED_FILL
+            )
+            if tenant.rent_is_formula and rebuild.source == "headers":
+                sheet.cell(row=row_index, column=9).fill = _EDIT_FILL
+            row_index += 1
+
+        row_index += 1
+        rebuilt = rebuild.annualized()
+        model = rebuild.model_gpr
+        sheet.cell(row=row_index, column=1, value="Rebuilt annualized base rent").font = _LABEL_FONT
+        cell = sheet.cell(row=row_index, column=6, value=rebuilt)
+        cell.number_format = "#,##0.00"
+        cell.font = _LABEL_FONT
+        row_index += 1
+        sheet.cell(row=row_index, column=1, value=f"Model {rebuild.line.value} line").font = _LABEL_FONT
+        cell = sheet.cell(row=row_index, column=6, value=model)
+        cell.number_format = "#,##0.00"
+        row_index += 1
+        if model is not None:
+            difference = model - rebuilt
+            ties = abs(difference) <= max(1.0, abs(model) * 0.001)
+            label = "TIES within 0.1%" if ties else f"DOES NOT TIE ({difference:+,.0f})"
+            cell = sheet.cell(row=row_index, column=1, value=label)
+            cell.font = Font(bold=True, color="376E37" if ties else "C00000")
+            row_index += 1
+        if rebuild.model_note:
+            row_index = _write_row(sheet, row_index, "OSAR note on this line", rebuild.model_note)
+
+        if rebuild.reconciliation:
+            row_index += 1
+            cell = sheet.cell(row=row_index, column=1, value="Reconciliation of the difference")
+            cell.font = _HEADER_FONT
+            cell.fill = _HEADER_FILL
+            sheet.cell(row=row_index, column=2).fill = _HEADER_FILL
+            row_index += 1
+            for item, amount in rebuild.reconciliation:
+                sheet.cell(row=row_index, column=1, value=item).alignment = _WRAP
+                sheet.merge_cells(
+                    start_row=row_index, start_column=1, end_row=row_index, end_column=5
+                )
+                if amount is not None:
+                    cell = sheet.cell(row=row_index, column=6, value=amount)
+                    cell.number_format = "#,##0.00"
+                row_index += 1
+
+        excluded = rebuild.excluded_with_rent()
+        if excluded:
+            row_index += 1
+            sheet.cell(
+                row=row_index, column=1, value="Excluded rows that still carry rent"
+            ).font = _LABEL_FONT
+            row_index += 1
+            for status, (count, total) in sorted(excluded.items()):
+                sheet.cell(row=row_index, column=1, value=f"{status}: {count} row(s)")
+                cell = sheet.cell(row=row_index, column=6, value=total * scale)
+                cell.number_format = "#,##0.00"
+                row_index += 1
+
+        for note in rebuild.notes:
+            sheet.cell(row=row_index, column=1, value=f"Note: {note}").alignment = _WRAP
+            sheet.merge_cells(start_row=row_index, start_column=1, end_row=row_index, end_column=8)
+            row_index += 1
+        row_index += 2
+
+    sheet.freeze_panes = "A2"
+
+
 def write_findings_workbook(result: LoanResult, destination: Path, run_date: dt.date | None = None) -> Path:
     """Write one loan's findings workbook and return the path written."""
     run_date = run_date or dt.date.today()
@@ -257,6 +403,7 @@ def write_findings_workbook(result: LoanResult, destination: Path, run_date: dt.
     summary.title = "Summary"
     _summary_sheet(summary, result, run_date)
     _findings_sheet(workbook.create_sheet("Findings"), result)
+    _rebuild_sheet(workbook.create_sheet("Rent Roll Rebuild"), result)
     _parameters_sheet(workbook.create_sheet("Loan Parameters"), result)
 
     destination = Path(destination)

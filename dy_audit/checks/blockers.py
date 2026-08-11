@@ -54,6 +54,11 @@ _DY_LABEL = re.compile(r"(^|\b)(debt yield|dy)\b", re.IGNORECASE)
 _ROW_RE = re.compile(r"^([A-Z]+)(\d+)$")
 
 
+def _col_of(coord: str) -> str | None:
+    m = _ROW_RE.match(coord.replace("$", "").upper())
+    return m.group(1) if m else None
+
+
 def _row_of(coord: str) -> int | None:
     m = _ROW_RE.match(coord.replace("$", "").upper())
     return int(m.group(2)) if m else None
@@ -221,15 +226,38 @@ def _find_occupancy_driver(ctx: LoanContext, res: F.Resolution) -> tuple[str | N
 
     Ares reads occupancy from column H of the OSAR tab rather than the DY
     column, so the driver is found by matching the occupancy *row* anywhere on
-    the OSAR sheet within the formula's dependency closure.
+    the OSAR sheet within the formula's dependency closure. The DY column is
+    preferred, then H, then the rest of the row: Memorial keeps `O16 = 1-I16`
+    (the vacancy *rate*) on the same row, and substituting an occupancy into
+    that cell would test the formula upside down.
     """
     deps = F.dependencies(ctx.wb, res.sheet, res.coord)
     occ_row = ctx.tab.rows.get(Line.OCCUPANCY)
     if occ_row is None:
         return None, deps
-    for key, (sheet, coord) in deps.items():
-        if sheet == ctx.tab.sheet and _row_of(coord) == occ_row:
-            return key, deps
+    on_row = [
+        (key, coord)
+        for key, (sheet, coord) in deps.items()
+        if sheet == ctx.tab.sheet and _row_of(coord) == occ_row
+    ]
+    for preferred in (ctx.tab.dy_column, "H"):
+        for key, coord in on_row:
+            if _col_of(coord) == preferred:
+                return key, deps
+    if on_row:
+        return on_row[0][0], deps
+    # A vacancy line may read occupancy straight off the rent roll: accept any
+    # dependency whose cached value equals the OSAR's occupancy figure.
+    occupancy = None
+    for column in (ctx.tab.dy_column, "H"):
+        occupancy = ctx.wb.number(ctx.tab.sheet, f"{column}{occ_row}")
+        if occupancy is not None:
+            break
+    if occupancy:
+        for key, (sheet, coord) in deps.items():
+            value = ctx.wb.number(sheet, coord)
+            if value is not None and abs(value - occupancy) < 1e-9:
+                return key, deps
     return None, deps
 
 
@@ -275,13 +303,21 @@ def check_vacancy_sign(ctx: LoanContext) -> list[Finding]:
 
     occ_key, deps = _find_occupancy_driver(ctx, res)
     if occ_key is None:
+        # No occupancy dependency at all: the line can never respond to
+        # occupancy, so the floor can never bite when occupancy rises above
+        # the threshold. Quincy's formula tests a blank cell instead of the
+        # occupancy figure and is permanently inert.
+        current = wb.number(tab.sheet, coord) or 0.0
         return [
             Finding(
                 "CHK_VACANCY_SIGN",
                 Severity.BLOCKER,
-                Status.MANUAL_REVIEW,
-                "Could not identify the occupancy cell the vacancy formula depends on, so the "
-                "sign could not be tested at synthetic occupancies. Review by hand.",
+                Status.FLAG,
+                f"The vacancy-loss formula does not depend on occupancy at all - none of "
+                f"its inputs carries the occupancy figure - so it returns "
+                f"{current:,.2f} at every occupancy and can never apply the floor when "
+                f"occupancy rises above the threshold. The reported DY may be unaffected "
+                f"this quarter and wrong the next.",
                 sheet=tab.sheet,
                 cell=coord,
                 evidence=f"{res.ref}{via} = {F.normalize(res.formula)}",

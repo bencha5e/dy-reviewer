@@ -88,6 +88,7 @@ Before looking at a single number, read `DEFINITIONS` and extract, verbatim wher
 | New / signed leases | The occupancy window (90 / 180 days) where one is stated |
 | Concessions | Trailing period and whether annualized (T3 / T6 / T12) |
 | Other income | Trailing period (T3 / T6 / T12) and the non-recurring carve-out |
+| Tenant-status screens | Every screen the definition actually states on the status of a tenant — bankruptcy, dark, month-to-month, free rent, an investment-grade carve-out. Quote each one, give its carve-out (assumed by the trustee / reaffirmed / affirmed / bona fide extension discussions), and name **which limb of the NOI it sits in**. `null` where the definition states none. See Section 4a: a word used in passing is not a screen |
 
 Capture only what the agreement states. Where a row has no clause, return `null` and move on — an absent parameter is a real answer, and it governs Section 4a.
 
@@ -120,15 +121,23 @@ Use the output format in Section 7.
 
 ---
 
-## 4a. What is not a defined term
+## 4a. Words that are only sometimes defined terms
 
-The following are **ordinary commercial words**, not defined terms. They appear inside NOI and Rents definitions in some agreements, but no agreement in this portfolio gives them their own meaning, sets a window for them, or makes them a screen:
+The following are **ordinary commercial words**. In most of these definitions they appear as description — used in passing, given no meaning of their own, no window, no threshold, and no consequence for revenue:
 
 > gone dark · bankruptcy · investment grade · free rent · month-to-month · percentage rent · rent steps / step-ups
 
-**Do not build a test around any of them.** Do not report that a workbook failed to exclude dark or bankrupt tenants, failed to strip free rent, failed to substantiate an investment-grade rating, or credited a rent step outside a window — there is no clause stating those requirements, so there is no departure to find. A finding of that shape is a false positive, and false positives cost as much as misses.
+**Where the agreement is silent, do not build a test around them.** Do not report that a workbook failed to exclude dark or bankrupt tenants, failed to strip free rent, failed to substantiate an investment-grade rating, or credited a rent step outside a window, when no clause states that requirement — there is no departure to find. A finding of that shape is a false positive, and false positives cost as much as misses.
 
-If you find yourself about to write "the definition requires…" about one of these, stop and re-read the clause. Either it states a testable parameter — in which case quote it and test that parameter — or it does not, in which case there is nothing to test.
+**Where the agreement does state one, the clause governs.** This list is a default, not a prohibition, and the default is rebutted by the words in front of you. Some agreements here do make one of these words a screen; where a definition states the condition and what happens to the revenue, it is a defined term and testable like any other, and leaving it untested is a miss that costs exactly what a false positive costs. Quote it and test it under R-30.
+
+Two questions separate a screen from a mention. Both must be yes.
+
+1. **Does the clause state a consequence for revenue?** *"(v) Rents relating to Tenants subject to a Bankruptcy Event unless the applicable Lease has been affirmed in connection with such Bankruptcy Event"* excludes revenue on a stated condition, with a stated carve-out — a screen. *"Rents shall mean … moneys payable as damages (including payments by reason of the rejection of a Lease in a bankruptcy proceeding)"* describes what Rents are and excludes nothing — a mention. The same word does both jobs in the same agreement, so read the sentence, not the word.
+
+2. **Does the limb carrying it reach the figure under test?** A screen only bites where the NOI actually draws on the limb that carries it. Operating Income limb (h) — *"any Rents paid by or on behalf of any Tenant under a Lease which is the subject of any proceeding or action relating to its bankruptcy … unless such Lease has been assumed by the trustee"* — is in substantially every agreement in this portfolio. But where the NOI takes *"the Operating Income (**excluding Rents from Leases**)"* for its other-income limb, every Rent has already been stripped out of that limb before (h) can act on it, and the rents limb beside it carries its own screen instead (*"Tenants that are current on their rental obligations"*). Testing that workbook's other-income line for a bankruptcy exclusion is a false positive built on a real clause. Trace the limb before you test the screen, and say in the finding which limb you tested against.
+
+If you find yourself about to write "the definition requires…" about one of these, stop and re-read the clause. Either it states a testable parameter on a limb that matters — in which case quote it and test that parameter — or it does not, in which case there is nothing to test.
 
 **The mirror case.** If, while tracing a formula, you notice the workbook applying an exclusion the agreement does **not** require, revenue is understated. Record it as a `Memo` with no dollar claim so the reviewer understands the sensitivity. Do not go looking for such exclusions, do not flag their absence, and do not treat their presence as an error.
 
@@ -229,6 +238,12 @@ Separately, a tenant whose move-out date is on or before the test date is not an
 **R-25 — Lease expiry inside a horizon the definition states.**
 *Detect:* only where the definition names a horizon. List tenants whose lease expires within it, and confirm the workbook's treatment is consistent across the tenant set — excluding one expiring tenant and retaining another with a nearer expiry is a finding. Where no horizon is stated, this rule does not apply; say so and move on.
 *Evidence:* tenant, expiry, treatment.
+
+**R-30 — A tenant-status screen the definition actually states.**
+Bankruptcy, dark, month-to-month, free rent and investment-grade carve-outs are screens only where this agreement makes them one. Section 4a is the gate; this rule is what happens once it opens. Where the definition states none, say so in one line and move on — that is the common case and it is a real answer.
+*Detect:* take the screen and the limb from Phase 0. Confirm the revenue chain for **that limb** applies it, and apply the carve-out exactly as written — a bankruptcy screen that lifts where the lease "has been assumed by the trustee", "reaffirmed", or "affirmed" does not exclude an assumed lease, and excluding one understates revenue, which is an error in the same size as failing to exclude. Where the workbook carries no column recording the status at all, the screen cannot have been performed: that is `Unquantified`, not a pass.
+*Evidence:* the clause verbatim, the limb it governs, the cell or column applying it (or a plain statement that none exists), the tenants meeting the condition, and the annualized rent.
+*Severity:* High where the screen is stated and nothing applies it; Medium where something applies it but on the wrong limb or without the carve-out.
 
 **R-26 — Divergence between a "Lender Calc" and a "Pro Forma" column.**
 Where a workbook presents two columns and only one carries exclusions, the reviewer must know which one the covenant test used and why they differ.
@@ -375,7 +390,7 @@ These are the mistakes this review specifically exists to prevent.
 1. **Treating a tie as a clean result.** In practice every one of these workbooks ties internally. The errors live in the gap between the formula and the contract, not in the arithmetic.
 2. **Reading the notes column instead of the formula.** The note is the analyst's intent. The formula is what happened.
 3. **Importing another loan's screens.** If this definition has no notice-to-vacate exclusion, including notice tenants is correct. Report it as a memo, never as an error.
-4. **Testing against words that are not defined terms.** See Section 4a. Dark, bankruptcy, investment grade, free rent, month-to-month, percentage rent and rent steps are not screens in this portfolio. A finding built on one of them is a false positive.
+4. **Testing against words the agreement never defined — or ignoring the ones it did.** See Section 4a. Dark, bankruptcy, investment grade, free rent, month-to-month, percentage rent and rent steps are usually description, and a finding built on a word this contract never made a screen is a false positive. The opposite error costs exactly as much: several agreements here do state one of them, and a stated screen left untested is a miss. Read the sentence, check which limb it sits on, then decide.
 5. **Filtering notice-to-vacate to past dates.** Where the clause has no time limit, a future move-out date is still notice. This single misreading accounted for the largest count of missed exclusions in the reference portfolio.
 6. **Accepting a zero exclusion count.** Zero flagged tenants on a date-driven screen usually means a stale cutoff cell, not a clean portfolio. Check the cutoff.
 7. **Sizing only what is easy to size.** A missing delinquency screen with no AR data is a High finding even though the impact is `Unquantified`. Do not let it drop out of the report because there is no number to put next to it.

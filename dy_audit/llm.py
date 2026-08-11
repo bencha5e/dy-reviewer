@@ -87,9 +87,17 @@ LLM_CHECK_ID = "CHK_REVENUE_LLM"
 #: Nothing in the deterministic suite emits this, so it needs no dedupe entry.
 TERM_SHEET_CHECK_ID = "CHK_TERM_SHEET_CONFLICT"
 
+#: R-30, the tenant-status screens of Section 4a - bankruptcy, dark,
+#: month-to-month. These are screens only on the loans whose own definition
+#: makes them one, so no deterministic check could carry them and there is
+#: nothing to dedupe against; without a heading of their own they would land in
+#: the escape hatch and read as miscellany rather than as a stated exclusion.
+TENANT_STATUS_CHECK_ID = "CHK_TENANT_STATUS_SCREEN"
+
 #: The check IDs the model may file a finding under.
 FINDING_CHECK_IDS = sorted(REVENUE_CHECK_IDS) + [
     TERM_SHEET_CHECK_ID,
+    TENANT_STATUS_CHECK_ID,
     "CHK_REVENUE_OTHER",
 ]
 
@@ -132,6 +140,16 @@ _TERM_SHEET_SCHEMA: dict[str, Any] = {
         "new_lease_window_days": {"type": ["integer", "null"]},
         "concessions_basis": {"type": ["string", "null"]},
         "other_income_basis": {"type": ["string", "null"]},
+        "tenant_status_screens": {
+            "type": ["string", "null"],
+            "description": (
+                "Screens the definition states on tenant status - bankruptcy, "
+                "dark, month-to-month, free rent, an investment-grade carve-out. "
+                "Quote each, give its carve-out, and name the NOI limb it sits "
+                "in. Null where the definition states none, which is the common "
+                "case: a word used in passing is not a screen (Section 4a)."
+            ),
+        },
     },
     "required": [
         "delinquency_threshold_days",
@@ -142,6 +160,7 @@ _TERM_SHEET_SCHEMA: dict[str, Any] = {
         "new_lease_window_days",
         "concessions_basis",
         "other_income_basis",
+        "tenant_status_screens",
     ],
     "additionalProperties": False,
 }
@@ -937,6 +956,7 @@ __all__ = [
     "LLM_CHECK_ID",
     "REVENUE_CHECK_IDS",
     "REVENUE_FINDINGS_SCHEMA",
+    "TENANT_STATUS_CHECK_ID",
     "TERM_SHEET_CHECK_ID",
     "build_brief",
     "extract_payload",

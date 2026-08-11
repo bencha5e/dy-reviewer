@@ -122,6 +122,11 @@ TERM_SHEET = {
     "new_lease_window_days": 90,
     "concessions_basis": "T6 annualized",
     "other_income_basis": "T12",
+    "tenant_status_screens": (
+        "Bankruptcy: Operating Income limb (h) excludes Rents from a Tenant in a "
+        "bankruptcy proceeding unless the Lease has been assumed by the trustee. "
+        "Sits on the Operating Income limb only."
+    ),
 }
 
 
@@ -566,7 +571,39 @@ def test_a_null_term_sheet_renders_without_crashing(strada, rules, tmp_path, mon
     assert text.count("not stated in the agreement") == len(TERM_SHEET)
 
 
-def test_the_review_covers_every_revenue_id_the_suite_can_raise():
+def test_a_stated_tenant_status_screen_reaches_the_reviewer(
+    strada, rules, tmp_path, monkeypatch
+):
+    # Section 4a's default is that bankruptcy and its neighbours are description.
+    # Where an agreement does make one a screen, Phase 0 has to carry it or the
+    # reviewer has no way to see which limb it was tested against.
+    monkeypatch.setattr(llm, "_call_anthropic", _stub_call)
+    result = audit_loan(strada, use_llm=True)
+    path = write_findings_workbook(result, tmp_path / "out.xlsx")
+    sheet = openpyxl.load_workbook(path)["Revenue Review"]
+    text = "\n".join(
+        str(c.value) for row in sheet.iter_rows() for c in row if c.value is not None
+    )
+    assert "Tenant-status screens stated" in text
+    assert "assumed by the trustee" in text
+    assert "Operating Income limb (h)" in text
+
+
+def test_the_shipped_rules_let_a_stated_clause_override_section_4a():
+    # The fix this pins: Section 4a used to say flatly that no agreement in the
+    # portfolio makes these words a screen, which is false - limb (h) of
+    # Operating Income carries a bankruptcy exclusion on substantially every
+    # loan here, and three of them screen bankruptcy in the Rents limb itself. A
+    # blanket prohibition turns those into guaranteed misses.
+    # Deliberately no `rules` fixture: this reads the file the tool ships with.
+    text = llm.rules_path().read_text(encoding="utf-8")
+    section = text.split("## 4a.")[1].split("## 4b.")[0]
+    assert "no agreement in this portfolio" not in section
+    assert "the clause governs" in section
+    # And the limb test, which is what keeps the licence from becoming its own
+    # false positive on the loans where (h) never touches the figure under test.
+    assert "excluding Rents from Leases" in section
+    assert "R-30" in text
     # If a new deterministic revenue check is added without adding its ID here,
     # the loan gets reviewed twice for the same defect. Fail loudly instead.
     allowed = set(llm.REVENUE_FINDINGS_SCHEMA["properties"]["findings"]["items"]["properties"][
@@ -579,6 +616,10 @@ def test_the_review_covers_every_revenue_id_the_suite_can_raise():
     # and silently vanish.
     assert llm.TERM_SHEET_CHECK_ID in allowed
     assert llm.TERM_SHEET_CHECK_ID not in llm.REVENUE_CHECK_IDS
+    # R-30 likewise: a screen only some of these agreements state, so no
+    # deterministic check carries it and there is nothing to dedupe against.
+    assert llm.TENANT_STATUS_CHECK_ID in allowed
+    assert llm.TENANT_STATUS_CHECK_ID not in llm.REVENUE_CHECK_IDS
     # Period and month-count stay with Python: they are arithmetic, not judgment.
     assert "CHK_PERIOD" not in llm.REVENUE_CHECK_IDS
     assert "CHK_MONTH_COUNT" not in llm.REVENUE_CHECK_IDS

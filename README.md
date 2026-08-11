@@ -40,7 +40,11 @@ otherwise:
   findings workbook and (with `--move`) the source model and definitions file.
   A second run the same day makes `v2`; an existing folder is never written into.
 - `DY Audit Run Log - <timestamp>.md` — which loans succeeded, which failed and
-  why, and a flag count by severity.
+  why, and a flag count by severity. Where the revenue review ran, it also
+  carries what that cost: input, cache write, cache read and output tokens per
+  loan, and the share of prompt tokens served from cache. The first loan of a
+  run writes the rules prefix and reads none of it back; the loans after it
+  should show most of their prompt coming from cache.
 
 **Moving is on by default**, so the input folder stays a queue of files not yet
 reviewed: after a clean run it holds nothing but the output folder. A loan that

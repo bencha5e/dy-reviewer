@@ -201,6 +201,51 @@ def test_run_log_records_totals_blockers_and_failures(audited, tmp_path):
     results[0].error = None
 
 
+def test_a_deterministic_run_reports_no_review_cost(audited, tmp_path):
+    # No review ran, so there is nothing to price. An empty cost table would
+    # read as a review that was free rather than one that never happened.
+    text = build_summary(
+        list(audited.values()), [], dt.datetime(2026, 8, 11, 9, 0), tmp_path, tmp_path, False
+    )
+    assert "Revenue review cost" not in text
+
+
+def test_review_cost_is_reported_per_loan_and_totalled(audited, tmp_path):
+    results = list(audited.values())
+    # The shape of a real run: the first loan writes the rules prefix and reads
+    # nothing back, every loan after it reads that prefix from cache.
+    results[0].facts["llm_usage"] = {
+        "input_tokens": 4_000,
+        "output_tokens": 9_000,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 6_000,
+    }
+    results[1].facts["llm_usage"] = {
+        "input_tokens": 4_000,
+        "output_tokens": 11_000,
+        "cache_read_input_tokens": 6_000,
+        "cache_creation_input_tokens": 0,
+    }
+    text = build_summary(
+        results, [], dt.datetime(2026, 8, 11, 9, 0), tmp_path, tmp_path, False
+    )
+    assert "Revenue review cost" in text
+    # The cache writer reads nothing, and says so rather than reporting a rate
+    # off cache traffic alone, which would have been 0/0.
+    assert "| 0.0% |" in text
+    assert "| 60.0% |" in text          # 6,000 read of 10,000 prompt tokens
+    assert "| **Run total** |" in text
+    assert "| 20,000 |" in text          # output, summed across both loans
+    assert "| 30.0% |" in text           # 6,000 read of 20,000 prompt tokens
+    # Loans the review never reached are simply absent, not zero-filled: the
+    # other three loans carry no usage and must not appear as rows of nothing.
+    section = text.split("## Revenue review cost")[1].split("##")[0]
+    assert sum(1 for line in section.splitlines() if line.startswith("| ")) == 4
+    assert results[2].loan_name not in section
+    for result in results:
+        result.facts.pop("llm_usage", None)
+
+
 def test_write_summary_creates_the_log_at_the_output_root(audited, tmp_path):
     path = write_summary(list(audited.values()), [], tmp_path, dt.datetime(2026, 8, 11, 9, 0))
     assert path.parent == tmp_path and path.suffix == ".md"

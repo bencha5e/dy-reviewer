@@ -786,7 +786,16 @@ def _call_anthropic(
             "extra_headers": {"anthropic-beta": "files-api-2025-04-14"},
         }
 
-        usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0}
+        # Cache creation is tracked alongside the read: the first loan of a run
+        # pays to write the rules prefix and reads nothing, so a rate computed
+        # without it reports that loan as 0% cached and flatters every loan
+        # after it.
+        usage_total = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
         content: Any = []
         for _ in range(MAX_CONTINUATIONS + 1):
             with client.messages.stream(messages=messages, **request) as stream:

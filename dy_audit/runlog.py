@@ -16,6 +16,70 @@ def _severity_totals(results: list[LoanResult]) -> dict[Severity, int]:
     return totals
 
 
+#: The usage keys the review reports, in the order they are rendered.
+_USAGE_KEYS = (
+    ("input_tokens", "Input"),
+    ("cache_creation_input_tokens", "Cache write"),
+    ("cache_read_input_tokens", "Cache read"),
+    ("output_tokens", "Output"),
+)
+
+
+def _cache_rate(usage: dict) -> float | None:
+    """Cached reads as a share of every prompt token the run was billed for.
+
+    Denominated on the whole prompt side rather than on cache traffic alone, so
+    the number answers the question actually being asked - how much of what we
+    sent came back from cache - and cannot be flattered by a run that cached
+    little but re-read it often.
+    """
+    prompt = sum(
+        usage.get(key, 0) or 0
+        for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    )
+    if not prompt:
+        return None
+    return (usage.get("cache_read_input_tokens", 0) or 0) / prompt
+
+
+def _cost_section(succeeded: list[LoanResult]) -> list[str]:
+    """What the revenue review cost, per loan and for the run.
+
+    Only rendered where a review actually ran. A deterministic run has no usage
+    to report, and an empty table would read as a review that cost nothing
+    rather than one that never happened.
+    """
+    priced = [r for r in succeeded if isinstance(r.facts.get("llm_usage"), dict)]
+    if not priced:
+        return []
+
+    lines = [
+        "## Revenue review cost",
+        "",
+        "| Loan | " + " | ".join(label for _, label in _USAGE_KEYS) + " | Cache read |",
+        "|---|" + "---:|" * (len(_USAGE_KEYS) + 1),
+    ]
+
+    totals = {key: 0 for key, _ in _USAGE_KEYS}
+    for result in sorted(priced, key=lambda r: r.loan_name):
+        usage = result.facts["llm_usage"]
+        cells = []
+        for key, _ in _USAGE_KEYS:
+            value = usage.get(key, 0) or 0
+            totals[key] += value
+            cells.append(f"{value:,}")
+        rate = _cache_rate(usage)
+        cells.append("n/a" if rate is None else f"{rate:.1%}")
+        lines.append(f"| {result.loan_name} | " + " | ".join(cells) + " |")
+
+    rate = _cache_rate(totals)
+    total_cells = [f"{totals[key]:,}" for key, _ in _USAGE_KEYS]
+    total_cells.append("n/a" if rate is None else f"{rate:.1%}")
+    lines.append("| **Run total** | " + " | ".join(total_cells) + " |")
+    lines.append("")
+    return lines
+
+
 def build_summary(
     results: list[LoanResult],
     problems: list[str],
@@ -84,6 +148,8 @@ def build_summary(
             for loan, finding in blockers:
                 lines.append(f"- **{loan}** `{finding.check_id}` at `{finding.ref}` - {finding.message}")
             lines.append("")
+
+    lines += _cost_section(succeeded)
 
     if failed:
         lines += [

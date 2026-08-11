@@ -394,6 +394,217 @@ def _rebuild_sheet(sheet, result: LoanResult) -> None:
     sheet.freeze_panes = "A2"
 
 
+#: Phase 0's term sheet, in the order the prompt lists it. The labels are the
+#: reviewer's words rather than the schema's keys.
+_TERM_SHEET_ROWS = [
+    ("delinquency_threshold_days", "Delinquency threshold (days)"),
+    ("notice_to_vacate", "Notice to vacate"),
+    ("vacancy_floor_pct", "Vacancy floor"),
+    ("vacancy_floor_base", "Vacancy floor applies to"),
+    ("occupancy_cap_pct", "Occupancy cap"),
+    ("new_lease_window_days", "New / signed lease window (days)"),
+    ("concessions_basis", "Concessions basis"),
+    ("other_income_basis", "Other income basis"),
+]
+
+_REVIEW_REBUILD_COLUMNS = [
+    ("Revenue line", 28),
+    ("OSAR cell", 12),
+    ("Reported", 15),
+    ("Rebuilt", 15),
+    ("Variance", 14),
+    ("Ties", 8),
+    ("How it was rebuilt", 70),
+]
+
+_REVIEW_FINDING_COLUMNS = [
+    ("ID", 6),
+    ("Rule", 7),
+    ("Severity", 10),
+    ("Type", 13),
+    ("Revenue line", 22),
+    ("Cells", 26),
+    ("Finding", 62),
+    ("Impact (annual)", 15),
+    ("Clause relied on", 46),
+    ("Evidence", 46),
+    ("Recommendation", 44),
+]
+
+
+def _section(sheet, row: int, title: str, width: int) -> int:
+    """A header band matching the one the other sheets use."""
+    cell = sheet.cell(row=row, column=1, value=title)
+    cell.font = _HEADER_FONT
+    cell.fill = _HEADER_FILL
+    for column in range(2, width + 1):
+        sheet.cell(row=row, column=column).fill = _HEADER_FILL
+    return row + 1
+
+
+def _table_head(sheet, row: int, columns) -> int:
+    for index, (title, width) in enumerate(columns, start=1):
+        cell = sheet.cell(row=row, column=index, value=title)
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _WRAP
+        sheet.column_dimensions[cell.column_letter].width = width
+    return row + 1
+
+
+def _revenue_sheet(sheet, result: LoanResult) -> None:
+    """The half of the LLM review the eight-column Findings sheet cannot hold.
+
+    The Findings sheet stays the report's spine and is unchanged. What lands
+    here is everything the review returns that has no column there: the term
+    sheet it built from the agreement, the line-by-line rebuild, the reviewer's
+    prose note, and the full record behind each finding - rule number, clause,
+    impact, recommendation, and every cell rather than just the first.
+    """
+    payload = result.facts.get("revenue_review")
+    if not isinstance(payload, dict):
+        sheet.cell(
+            row=1,
+            column=1,
+            value=(
+                "No model revenue review is attached to this loan. Either the run "
+                "used --no-llm, in which case the deterministic revenue checks "
+                "answered these lines and appear on the Findings sheet, or the "
+                "review did not complete - look for CHK_REVENUE_LLM."
+            ),
+        ).alignment = _WRAP
+        sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=8)
+        sheet.column_dimensions["A"].width = 110
+        return
+
+    row = 1
+    sheet.cell(row=row, column=1, value="Revenue review").font = _TITLE_FONT
+    row += 1
+    header_bits = [
+        f"loan: {payload.get('loan') or result.loan_name}",
+        f"test date: {payload.get('test_date') or 'not stated'}",
+        f"OSAR tab: {payload.get('osar_tab') or 'not stated'}",
+    ]
+    sheet.cell(row=row, column=1, value="; ".join(header_bits)).alignment = _WRAP
+    row += 2
+
+    note = (payload.get("reviewer_note") or "").strip()
+    if note:
+        row = _section(sheet, row, "Reviewer note", 7)
+        cell = sheet.cell(row=row, column=1, value=note)
+        cell.alignment = _WRAP
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+        sheet.row_dimensions[row].height = 108
+        row += 2
+
+    term_sheet = payload.get("term_sheet")
+    if isinstance(term_sheet, dict):
+        row = _section(sheet, row, "Term sheet, as read from the agreement", 7)
+        sheet.cell(
+            row=row,
+            column=1,
+            value=(
+                "The model's reading of the clause governs. A blank means the "
+                "agreement states no such parameter - which is a real answer, and "
+                "stands the rules that depend on it down. Compare against the "
+                "parsed values on the Loan Parameters sheet."
+            ),
+        ).alignment = _WRAP
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+        row += 1
+        for key, label in _TERM_SHEET_ROWS:
+            value = term_sheet.get(key)
+            rendered = "not stated in the agreement" if value is None else value
+            sheet.cell(row=row, column=1, value=label).font = _LABEL_FONT
+            cell = sheet.cell(row=row, column=2, value=rendered)
+            cell.alignment = _WRAP
+            if value is None:
+                cell.font = Font(italic=True, color="808080")
+            elif key.endswith("_pct") and isinstance(value, (int, float)):
+                cell.number_format = "0.00%"
+            sheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)
+            row += 1
+        row += 1
+
+    rebuild = payload.get("rebuild")
+    if isinstance(rebuild, list) and rebuild:
+        row = _section(sheet, row, "Independent rebuild of each revenue line", 7)
+        row = _table_head(sheet, row, _REVIEW_REBUILD_COLUMNS)
+        for entry in rebuild:
+            if not isinstance(entry, dict):
+                continue
+            ties = str(entry.get("flag") or "").upper() == "PASS"
+            values = [
+                entry.get("line"),
+                entry.get("osar_cell"),
+                entry.get("reported"),
+                entry.get("rebuilt"),
+                entry.get("variance"),
+                "PASS" if ties else "FLAG",
+                entry.get("derivation"),
+            ]
+            for index, value in enumerate(values, start=1):
+                cell = sheet.cell(row=row, column=index, value=value)
+                cell.alignment = _WRAP if index == 7 else _TOP
+                cell.border = _BORDER
+                if index in (3, 4, 5) and isinstance(value, (int, float)):
+                    cell.number_format = "#,##0.00"
+            flag_cell = sheet.cell(row=row, column=6)
+            flag_cell.fill = _STATUS_FILL[Status.PASS if ties else Status.FLAG]
+            flag_cell.font = Font(bold=True, color="376E37" if ties else "C00000")
+            row += 1
+        row += 2
+
+    findings = payload.get("findings")
+    if isinstance(findings, list) and findings:
+        row = _section(sheet, row, "Findings in full", 11)
+        head_row = row
+        row = _table_head(sheet, row, _REVIEW_FINDING_COLUMNS)
+        for entry in findings:
+            if not isinstance(entry, dict):
+                continue
+            cells = entry.get("cells")
+            if isinstance(cells, str):
+                cells = [cells]
+            values = [
+                entry.get("id"),
+                entry.get("rule"),
+                entry.get("severity"),
+                entry.get("type"),
+                entry.get("revenue_line"),
+                ", ".join(c for c in (cells or []) if isinstance(c, str)),
+                entry.get("finding"),
+                entry.get("impact_annualized"),
+                entry.get("clause"),
+                entry.get("evidence"),
+                entry.get("recommendation"),
+            ]
+            for index, value in enumerate(values, start=1):
+                cell = sheet.cell(row=row, column=index, value=value)
+                cell.alignment = _WRAP
+                cell.border = _BORDER
+                if index == 8 and isinstance(value, (int, float)):
+                    cell.number_format = "#,##0.00"
+            severity = _coerce_severity(entry.get("severity"))
+            if severity is not None:
+                severity_cell = sheet.cell(row=row, column=3)
+                severity_cell.fill = _SEVERITY_FILL[severity]
+                if severity in _SEVERITY_FONT:
+                    severity_cell.font = _SEVERITY_FONT[severity]
+            row += 1
+        sheet.freeze_panes = sheet.cell(row=head_row + 1, column=1).coordinate
+
+    sheet.column_dimensions["A"].width = max(sheet.column_dimensions["A"].width or 0, 28)
+
+
+def _coerce_severity(value) -> Severity | None:
+    """The review writes 'High'; the palette is keyed on the Severity enum."""
+    try:
+        return Severity(str(value).strip().upper())
+    except (ValueError, AttributeError):
+        return None
+
+
 def write_findings_workbook(result: LoanResult, destination: Path, run_date: dt.date | None = None) -> Path:
     """Write one loan's findings workbook and return the path written."""
     run_date = run_date or dt.date.today()
@@ -404,6 +615,7 @@ def write_findings_workbook(result: LoanResult, destination: Path, run_date: dt.
     _summary_sheet(summary, result, run_date)
     _findings_sheet(workbook.create_sheet("Findings"), result)
     _rebuild_sheet(workbook.create_sheet("Rent Roll Rebuild"), result)
+    _revenue_sheet(workbook.create_sheet("Revenue Review"), result)
     _parameters_sheet(workbook.create_sheet("Loan Parameters"), result)
 
     destination = Path(destination)

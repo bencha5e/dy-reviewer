@@ -74,9 +74,30 @@ The rules it works from live in `DY_Revenue_Reviewer_System_Prompt_LLM.md`, sent
 as a cached prompt prefix so the second and later loans in a run don't pay for it
 again.
 
-Findings come back as JSON against a schema that mirrors the `Finding` dataclass,
-so they merge into the same list, sort by the same key, and render into the same
-workbook as the deterministic ones. The output format is unchanged.
+**The loan agreement goes with it, verbatim.** The review's first phase builds a
+term sheet — delinquency threshold, notice-to-vacate window, the vacancy floor
+*and which revenue it attaches to*, the trailing periods — from the clause text
+rather than from parsed values, because a regex flattens a clause and the limb it
+drops is often the one that matters. The parsed `LoanParams` go in alongside as a
+cross-check, and where the two disagree that is its own finding
+(`CHK_TERM_SHEET_CONFLICT`): the model's reading of the clause wins, and the
+disagreement usually means the parser missed a limb.
+
+**Only defined terms are testable.** Words like *dark*, *bankruptcy*,
+*investment grade*, *free rent*, *month-to-month*, *percentage rent* and *rent
+steps* appear inside these NOI definitions but are never themselves defined —
+no window, no threshold, no screen. The prompt names them and forbids building a
+test around any of them, because a workbook cannot depart from a rule its
+contract does not state, and a finding of that shape is a false positive. The
+mirror case is handled too: an exclusion the workbook applies that the agreement
+does *not* require understates revenue, and is recorded as a memo.
+
+Findings come back as one JSON object per loan. The findings themselves merge
+into the same list as the deterministic ones, sort by the same key, and render
+into the same eight columns — that sheet is unchanged. What the review returns
+beyond a finding — the term sheet, the line-by-line rebuild, the reviewer's prose
+note, and each finding's rule number, clause, dollar impact and recommendation —
+has no column there, so it lands on a new **Revenue Review** sheet.
 
 `--no-llm` falls back to the deterministic revenue checks, which are still in the
 codebase and still tested. It needs no API key and no network — use it for

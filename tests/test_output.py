@@ -91,10 +91,25 @@ def workbook_for(audited, tmp_path):
     return build
 
 
-def test_findings_workbook_has_the_four_sheets(workbook_for):
+def test_findings_workbook_has_the_five_sheets(workbook_for):
     wb, path = workbook_for("Hialeah")
-    assert wb.sheetnames == ["Summary", "Findings", "Rent Roll Rebuild", "Loan Parameters"]
+    assert wb.sheetnames == [
+        "Summary",
+        "Findings",
+        "Rent Roll Rebuild",
+        "Revenue Review",
+        "Loan Parameters",
+    ]
     assert path.exists() and path.stat().st_size > 0
+
+
+def test_revenue_review_sheet_says_so_when_no_model_review_ran(workbook_for):
+    # These fixtures are audited with --no-llm, so the sheet exists but has no
+    # payload behind it. It must say which of the two reasons applies rather
+    # than sitting blank, which would read as a clean revenue section.
+    wb, _ = workbook_for("Hialeah")
+    text = wb["Revenue Review"].cell(row=1, column=1).value
+    assert "--no-llm" in text and "CHK_REVENUE_LLM" in text
 
 
 def test_findings_sheet_lists_every_finding_blockers_first(audited, workbook_for):

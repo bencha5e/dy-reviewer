@@ -114,6 +114,7 @@ def audit_loan(
         result.facts["params"] = ctx.params
         result.facts["rebuilds"] = ctx.facts.get("rebuilds") or []
         result.facts["llm_usage"] = ctx.facts.get("llm_usage")
+        result.facts["revenue_review"] = ctx.facts.get("revenue_review")
     except Exception as exc:  # noqa: BLE001 - one loan's failure must not stop the run
         result.error = f"{type(exc).__name__}: {exc}"
         result.facts["traceback"] = traceback.format_exc()

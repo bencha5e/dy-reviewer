@@ -83,79 +83,193 @@ REVENUE_CHECK_IDS = frozenset(
 #: Raised when the review itself could not be completed.
 LLM_CHECK_ID = "CHK_REVENUE_LLM"
 
+#: Raised when the model's reading of a clause disagrees with the regex parser's.
+#: Nothing in the deterministic suite emits this, so it needs no dedupe entry.
+TERM_SHEET_CHECK_ID = "CHK_TERM_SHEET_CONFLICT"
+
+#: The check IDs the model may file a finding under.
+FINDING_CHECK_IDS = sorted(REVENUE_CHECK_IDS) + [
+    TERM_SHEET_CHECK_ID,
+    "CHK_REVENUE_OTHER",
+]
+
 
 # --------------------------------------------------------------------------
 # Output schema
 # --------------------------------------------------------------------------
 
-#: Mirrors the `Finding` dataclass field for field, so parsing is a constructor
-#: call rather than a translation layer. Constraining `check_id` to the IDs the
-#: report already knows keeps the Findings sheet's sort and colour coding
-#: meaningful; CHK_REVENUE_OTHER is the escape hatch for a defect that fits
-#: none of them.
+#: The prompt's own vocabulary, not the report's. The model reasons in rules
+#: (R-01..R-29) and finding types (Quantified, Memo, Latent, ...); the report is
+#: organised by check ID and status. Translating in `to_findings` rather than
+#: forcing the model into the report's shape keeps each side idiomatic - and the
+#: fields with no home in the eight-column Findings sheet (clause, impact,
+#: recommendation, the full cell list) are what the Revenue Review sheet renders.
+_TERM_SHEET_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Phase 0. Read from the agreement text, not from the parser's values. "
+        "Null means the agreement states no such parameter, which is a real "
+        "answer and governs which rules can run at all."
+    ),
+    "properties": {
+        "delinquency_threshold_days": {"type": ["integer", "null"]},
+        "notice_to_vacate": {
+            "type": ["string", "null"],
+            "description": (
+                "'none' when no NTV exclusion exists, 'no time limit' when the "
+                "clause has no window, otherwise the window as written."
+            ),
+        },
+        "vacancy_floor_pct": {"type": ["number", "null"]},
+        "vacancy_floor_base": {
+            "type": ["string", "null"],
+            "description": (
+                "Which revenue the factor applies to. Note both where the "
+                "agreement sets different factors per revenue limb."
+            ),
+        },
+        "occupancy_cap_pct": {"type": ["number", "null"]},
+        "new_lease_window_days": {"type": ["integer", "null"]},
+        "concessions_basis": {"type": ["string", "null"]},
+        "other_income_basis": {"type": ["string", "null"]},
+    },
+    "required": [
+        "delinquency_threshold_days",
+        "notice_to_vacate",
+        "vacancy_floor_pct",
+        "vacancy_floor_base",
+        "occupancy_cap_pct",
+        "new_lease_window_days",
+        "concessions_basis",
+        "other_income_basis",
+    ],
+    "additionalProperties": False,
+}
+
+_REBUILD_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "description": "Phase 2, one row per in-scope revenue line rebuilt from source.",
+    "items": {
+        "type": "object",
+        "properties": {
+            "line": {"type": "string"},
+            "osar_cell": {"type": ["string", "null"]},
+            "reported": {"type": ["number", "null"]},
+            "rebuilt": {"type": ["number", "null"]},
+            "variance": {"type": ["number", "null"]},
+            "flag": {"type": "string", "enum": ["PASS", "FLAG"]},
+            "derivation": {
+                "type": "string",
+                "description": "How the rebuilt figure was built, so it can be checked.",
+            },
+        },
+        "required": [
+            "line",
+            "osar_cell",
+            "reported",
+            "rebuilt",
+            "variance",
+            "flag",
+            "derivation",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+_FINDING_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "F1, F2, ... unique within this review."},
+        "severity": {
+            "type": "string",
+            "enum": ["Blocker", "High", "Medium", "Low", "Info"],
+        },
+        "type": {
+            "type": "string",
+            "enum": [
+                "Quantified",
+                "Memo",
+                "Unquantified",
+                "Control",
+                "Methodology",
+                "Latent",
+                "Verified",
+            ],
+        },
+        "revenue_line": {"type": "string"},
+        "rule": {"type": "string", "description": "The R-number from the catalog."},
+        "check_id": {
+            "type": "string",
+            "enum": FINDING_CHECK_IDS,
+            "description": (
+                "Which heading this lands under on the reviewer's report. Pick the "
+                "closest; CHK_REVENUE_OTHER is the escape hatch."
+            ),
+        },
+        "cells": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Every cell the finding rests on, most important first. Prefix with "
+                "a sheet name (Sheet!A1) where the cell is off the OSAR tab."
+            ),
+        },
+        "clause": {
+            "type": ["string", "null"],
+            "description": "Verbatim words from the definition being relied on.",
+        },
+        "finding": {"type": "string", "description": "What is wrong, in plain sentences."},
+        "impact_annualized": {
+            "type": ["number", "null"],
+            "description": "Dollar effect for a full year; null when not quantifiable.",
+        },
+        "evidence": {"type": ["string", "null"]},
+        "recommendation": {"type": ["string", "null"]},
+    },
+    "required": [
+        "id",
+        "severity",
+        "type",
+        "revenue_line",
+        "rule",
+        "check_id",
+        "cells",
+        "clause",
+        "finding",
+        "impact_annualized",
+        "evidence",
+        "recommendation",
+    ],
+    "additionalProperties": False,
+}
+
 REVENUE_FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "check_id": {
-                        "type": "string",
-                        "enum": sorted(REVENUE_CHECK_IDS) + ["CHK_REVENUE_OTHER"],
-                    },
-                    "severity": {
-                        "type": "string",
-                        "enum": ["BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"],
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["FLAG", "PASS", "MANUAL_REVIEW", "UNVERIFIABLE"],
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": (
-                            "What is wrong and what it costs, in one or two sentences. "
-                            "Name the dollar impact and the annualisation where there is "
-                            "one. Written for a reviewer who has not opened the workbook."
-                        ),
-                    },
-                    "sheet": {"type": ["string", "null"]},
-                    "cell": {
-                        "type": ["string", "null"],
-                        "description": "A1-style coordinate, no sheet prefix.",
-                    },
-                    "evidence": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "The formula text, cell values, or row counts the finding "
-                            "rests on. This is what lets a reviewer check the work."
-                        ),
-                    },
-                    "on_dy_path": {
-                        "type": ["boolean", "null"],
-                        "description": (
-                            "True when the cell feeds the debt-yield calculation, false "
-                            "when it does not, null when the distinction does not apply."
-                        ),
-                    },
-                },
-                "required": [
-                    "check_id",
-                    "severity",
-                    "status",
-                    "message",
-                    "sheet",
-                    "cell",
-                    "evidence",
-                    "on_dy_path",
-                ],
-                "additionalProperties": False,
-            },
-        }
+        "loan": {"type": "string"},
+        "test_date": {"type": ["string", "null"]},
+        "osar_tab": {"type": ["string", "null"]},
+        "term_sheet": _TERM_SHEET_SCHEMA,
+        "rebuild": _REBUILD_SCHEMA,
+        "findings": {"type": "array", "items": _FINDING_SCHEMA},
+        "reviewer_note": {
+            "type": "string",
+            "description": (
+                "Six to twelve sentences for a credit officer who will not read the "
+                "JSON. This is Block B: structured output constrains the response to "
+                "one object, so the prose note travels inside it."
+            ),
+        },
     },
-    "required": ["findings"],
+    "required": [
+        "loan",
+        "test_date",
+        "osar_tab",
+        "term_sheet",
+        "rebuild",
+        "findings",
+        "reviewer_note",
+    ],
     "additionalProperties": False,
 }
 
@@ -293,11 +407,57 @@ def _figures_brief(ctx: LoanContext) -> list[str]:
     return lines or ["  (no revenue lines were resolved on the OSAR tab)"]
 
 
+def _definitions_text(ctx: LoanContext) -> str:
+    """The loan agreement's defined terms, verbatim.
+
+    Phase 0 cannot run without this. The parsed `LoanParams` below carry the
+    numbers a regex found; only the clause text carries the limbs it flattened -
+    which revenue a vacancy factor attaches to, whether a notice-to-vacate
+    exclusion has a window at all. These files run 4-10 KB, so sending the whole
+    thing is cheaper than deciding what to leave out.
+    """
+    path = getattr(ctx.files, "defs_path", None)
+    if not path or not Path(path).is_file():
+        return "  (no loan agreement definitions file was found for this loan)"
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return f"  (the definitions file could not be read: {exc})"
+
+
+def _meta_brief(ctx: LoanContext) -> list[str]:
+    """META, per the input contract."""
+    period = ctx.tab.period_end
+    basis = None
+    if ctx.params is not None:
+        basis = getattr(getattr(ctx.params, "reserve_basis", None), "value", None)
+    # Inferred, not read: the reserve is struck per unit on residential and per
+    # square foot on commercial, which is the only property-type signal the
+    # workbook carries in a fixed place.
+    property_type = {"unit": "multifamily (inferred)", "sf": "commercial (inferred)"}.get(
+        str(basis).lower(), "not determined"
+    )
+    # The property count sits in the overview block near the top of the tab,
+    # not in the debt-yield column. Column E first, then D, matching how
+    # CHK_UNIT_SF_TIE reads the same row.
+    size = None
+    count_row = ctx.tab.rows.get(Line.NRSF)
+    if count_row is not None:
+        for column in ("E", "D", ctx.tab.dy_column):
+            size = ctx.wb.number(ctx.tab.sheet, f"{column}{count_row}")
+            if size:
+                break
+    return [
+        f"  - Test date: {period.strftime('%Y-%m-%d') if period else 'not read from the workbook'}",
+        f"  - Property type: {property_type}",
+        f"  - Net rentable units / SF: {size:,.0f}" if size else "  - Net rentable units / SF: not read",
+        f"  - OSAR tab selected: {ctx.tab.sheet!r}",
+    ]
+
+
 def build_brief(ctx: LoanContext) -> str:
     """The per-loan half of the prompt. The rules are the stable half."""
     tabs = ctx.facts.get("source_tabs") or {}
-    period = ctx.tab.period_end
-    period_text = period.strftime("%m/%d/%Y") if period else "not read from the workbook"
 
     def tab_line(label: str, key: str) -> str:
         name = tabs.get(key)
@@ -312,13 +472,22 @@ def build_brief(ctx: LoanContext) -> str:
         "these models use functions that blank out on recalculation, and the cached "
         "values are the numbers the analyst actually reported.",
         "",
+        "## META",
+        *_meta_brief(ctx),
+        "",
+        "## DEFINITIONS",
+        "The defined terms from this loan's own agreement, verbatim. Build the "
+        "Phase 0 term sheet from these words, not from the parsed values below. "
+        "Where the agreement states no parameter for a term-sheet row, that is a "
+        "real answer - return null and let the rules that depend on it stand down.",
+        "",
+        _definitions_text(ctx),
+        "",
         "## Where things are",
-        f"  - OSAR tab under audit: {ctx.tab.sheet!r}",
-        f"  - Debt-yield column on that tab: {ctx.tab.dy_column!r}",
-        f"  - Quarter end / statement ending: {period_text}",
         tab_line("Rent roll tab", "rent_roll"),
         tab_line("T12 / operating statement tab", "t12"),
         tab_line("AR aging tab", "ar"),
+        f"  - Debt-yield column on the OSAR tab: {ctx.tab.dy_column!r}",
         "",
         "  Those tab names are what this tool resolved by following the model's own "
         "formulas. Treat them as a starting point: if the GPR line actually draws on "
@@ -328,7 +497,11 @@ def build_brief(ctx: LoanContext) -> str:
         "## Revenue lines as the model reports them",
         *_figures_brief(ctx),
         "",
-        "## What the loan agreement says",
+        "## The same agreement, as a regex parser read it",
+        "  A cross-check, not an authority. Your reading of the clause wins - the "
+        "parser flattens, and can miss a limb, a carve-out, or a second percentage. "
+        "Where your term sheet and this disagree, that disagreement is a finding "
+        "under R-27.",
         *_params_brief(ctx),
         "",
         "## Python's independent rent-roll rebuild",
@@ -338,12 +511,11 @@ def build_brief(ctx: LoanContext) -> str:
         *_rebuild_brief(ctx),
         "",
         "## What to return",
-        "Work through the revenue rules in your instructions against this workbook, "
-        "then return findings under the JSON schema you have been given. Emit a "
-        "finding for every rule you evaluated, including the ones that passed - a "
-        "silent rule is indistinguishable from one that was never run. Where you "
-        "could not complete a check, say so with MANUAL_REVIEW or UNVERIFIABLE "
-        "rather than passing it.",
+        "Work the phases in order against this workbook, then return one JSON object "
+        "under the schema you have been given. Emit a finding for every rule you "
+        "evaluated, including the ones that passed - a silent rule is "
+        "indistinguishable from one that was never run. Where you could not complete "
+        "a check, say so with type `Unquantified` rather than passing it.",
     ]
     return "\n".join(sections)
 
@@ -398,31 +570,112 @@ def _coerce(value: Any, enum: Any, default: Any) -> Any:
         return default
 
 
+#: The prompt classifies a finding by what kind of thing it is; the report asks
+#: what the check concluded. `Memo` is the one that needs care: a permitted
+#: inclusion the reviewer should understand as a sensitivity is not a defect, so
+#: it passes - but at INFO, which the severity totals count regardless of status,
+#: so it stays visible rather than reading as nothing to see.
+_TYPE_TO_STATUS = {
+    "verified": Status.PASS,
+    "memo": Status.PASS,
+    "unquantified": Status.UNVERIFIABLE,
+    "control": Status.FLAG,
+    "methodology": Status.FLAG,
+    "latent": Status.FLAG,
+    "quantified": Status.FLAG,
+}
+
+
+def _split_cells(cells: Any) -> tuple[str | None, str | None, list[str]]:
+    """First cell becomes the Sheet/Cell columns; the rest go to evidence.
+
+    The Findings sheet has one Cell column and it is A1-only, so a model that
+    writes "Rent Roll (MF)!Q9" has to be taken apart rather than passed through.
+    """
+    if isinstance(cells, str):
+        cells = [cells]
+    entries = [c.strip() for c in (cells or []) if isinstance(c, str) and c.strip()]
+    if not entries:
+        return None, None, []
+    primary, rest = entries[0], entries[1:]
+    if "!" in primary:
+        sheet, cell = primary.rsplit("!", 1)
+        return (sheet.strip("'") or None), (cell or None), rest
+    return None, primary, rest
+
+
+def _money(value: Any) -> str | None:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if abs(amount) < 0.005 else f"{amount:,.2f}"
+
+
 def to_findings(payload: dict) -> list[Finding]:
-    """Turn the parsed JSON into Findings the report can already render."""
+    """Translate the review's vocabulary into the report's.
+
+    The model reports rules and finding types; the report renders check IDs and
+    statuses. Everything the eight-column Findings sheet has no room for -
+    clause, recommendation, the full cell list, the rule number - is folded into
+    the message and evidence here, and rendered in full on the Revenue Review
+    sheet from the raw payload.
+    """
     findings: list[Finding] = []
     for item in payload.get("findings") or []:
         if not isinstance(item, dict):
             continue
-        message = (item.get("message") or "").strip()
+        # `finding` is this schema's message field; `message` is the older one.
+        message = (item.get("finding") or item.get("message") or "").strip()
         if not message:
             continue
-        check_id = (item.get("check_id") or "CHK_REVENUE_OTHER").strip()
-        cell = item.get("cell")
-        if isinstance(cell, str) and "!" in cell:
-            # A model that writes "Sheet!B12" into the cell field would break the
-            # Findings sheet's Cell column, which is A1-only.
-            cell = cell.rsplit("!", 1)[1]
+
+        rule = (item.get("rule") or "").strip()
+        if rule:
+            message = f"[{rule}] {message}"
+        impact = _money(item.get("impact_annualized"))
+        if impact:
+            message = f"{message} Impact: ${impact} annualised."
+
+        sheet, cell, extra_cells = _split_cells(item.get("cells"))
+        if sheet is None:
+            sheet = item.get("sheet") or None
+        if cell is None:
+            raw = item.get("cell")
+            cell = raw.rsplit("!", 1)[-1] if isinstance(raw, str) and "!" in raw else raw
+
+        evidence_parts = [
+            (item.get("evidence") or "").strip(),
+            f"Clause: {item['clause'].strip()}" if (item.get("clause") or "").strip() else "",
+            f"Also: {', '.join(extra_cells)}" if extra_cells else "",
+            (
+                f"Recommend: {item['recommendation'].strip()}"
+                if (item.get("recommendation") or "").strip()
+                else ""
+            ),
+        ]
+        evidence = " | ".join(part for part in evidence_parts if part) or None
+
+        kind = str(item.get("type") or "").strip().lower()
+        status = _TYPE_TO_STATUS.get(kind)
+        if status is None:
+            # An older payload carrying `status` directly, or a type this schema
+            # does not know. Neither may become a silent PASS.
+            status = _coerce(item.get("status"), Status, Status.MANUAL_REVIEW)
+        severity = _coerce(item.get("severity"), Severity, Severity.HIGH)
+        if kind == "memo":
+            severity = Severity.INFO
+
         findings.append(
             Finding(
-                check_id,
-                _coerce(item.get("severity"), Severity, Severity.HIGH),
-                _coerce(item.get("status"), Status, Status.MANUAL_REVIEW),
+                (item.get("check_id") or "CHK_REVENUE_OTHER").strip(),
+                severity,
+                status,
                 message,
-                sheet=item.get("sheet") or None,
+                sheet=sheet or None,
                 cell=cell or None,
-                evidence=(item.get("evidence") or None),
-                on_dy_path=item.get("on_dy_path"),
+                evidence=evidence,
+                on_dy_path=item.get("on_dy_path", True),
             )
         )
     return findings
@@ -667,6 +920,10 @@ def review_revenue_with_llm(
         return [unverifiable(f"{type(exc).__name__}: {exc}")]
 
     ctx.facts["llm_usage"] = usage
+    # The whole payload, not just the findings: the term sheet, the rebuild
+    # table and the reviewer note have no home in the eight-column Findings
+    # sheet and are rendered from here onto the Revenue Review sheet.
+    ctx.facts["revenue_review"] = payload
     findings = to_findings(payload)
     if not findings:
         return [unverifiable("the review returned no findings")]
@@ -676,9 +933,11 @@ def review_revenue_with_llm(
 __all__ = [
     "DEFAULT_EFFORT",
     "DEFAULT_MODEL",
+    "FINDING_CHECK_IDS",
     "LLM_CHECK_ID",
     "REVENUE_CHECK_IDS",
     "REVENUE_FINDINGS_SCHEMA",
+    "TERM_SHEET_CHECK_ID",
     "build_brief",
     "extract_payload",
     "load_rules",

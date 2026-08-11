@@ -22,9 +22,9 @@ line overstates it on every loan.
 ```bash
 pip install -r requirements.txt
 
-python audit_dy.py --input-dir "…/Input DY Tests"            # review only
-python audit_dy.py --input-dir "…/Input DY Tests" --move     # …and drain the queue
-python audit_dy.py --input-dir "…" --loan Strada             # one loan
+python audit_dy.py --input-dir "…/Input DY Tests"              # review and drain the queue
+python audit_dy.py --input-dir "…/Input DY Tests" --no-move    # review in place, change nothing
+python audit_dy.py --input-dir "…" --loan Strada               # one loan
 ```
 
 One run reviews every loan pair in the folder. Each loan is processed
@@ -40,9 +40,11 @@ otherwise:
 - `DY Audit Run Log - <timestamp>.md` — which loans succeeded, which failed and
   why, and a flag count by severity.
 
-**`--move` is off by default.** A run never disturbs the input folder unless
-asked, and a loan that failed keeps its source files in the queue so the next
-run retries it.
+**Moving is on by default**, so the input folder stays a queue of files not yet
+reviewed: after a clean run it holds nothing but the output folder. A loan that
+*failed* is never moved — its source files stay put so the next run retries it.
+Use `--no-move` to review in place and leave the folder exactly as it was, which
+is the safe way to preview a run.
 
 ## What it checks
 

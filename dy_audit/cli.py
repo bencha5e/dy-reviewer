@@ -45,11 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--move",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Move each successfully reviewed loan's source files out of the input queue into "
-            "its output folder. Off by default, so a run never disturbs the input folder "
-            "unless asked."
+            "its output folder. On by default, so the input folder stays a queue of files not "
+            "yet reviewed. Pass --no-move to review in place and leave the folder untouched. "
+            "A loan that fails is never moved, whichever setting is used."
         ),
     )
     parser.add_argument(

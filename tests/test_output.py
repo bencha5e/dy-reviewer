@@ -238,9 +238,21 @@ def test_failed_loan_keeps_its_sources_in_the_queue(input_copy, tmp_path):
 # -- CLI end to end -----------------------------------------------------------
 
 
-def test_cli_leaves_the_input_folder_alone_without_move(input_copy):
-    before = sorted(p.name for p in input_copy.iterdir())
+def test_cli_moves_the_queue_by_default(input_copy):
+    # Moving is the default: the input folder is a queue of files not yet
+    # reviewed, so a clean run should leave nothing behind but the output.
     assert run(["--input-dir", str(input_copy), "--quiet"]) == 0
+    leftover = [p.name for p in input_copy.iterdir() if p.name != "DY Review Output"]
+    assert leftover == []
+    for folder in (input_copy / "DY Review Output").iterdir():
+        if folder.is_dir():
+            assert len(list(folder.glob("*.xlsx"))) == 2  # model plus findings
+            assert len(list(folder.glob("*DYDefinitions.md"))) == 1
+
+
+def test_cli_no_move_leaves_the_input_folder_alone(input_copy):
+    before = sorted(p.name for p in input_copy.iterdir())
+    assert run(["--input-dir", str(input_copy), "--no-move", "--quiet"]) == 0
     after = sorted(p.name for p in input_copy.iterdir() if p.name != "DY Review Output")
     assert after == before
 
@@ -273,12 +285,17 @@ def test_cli_move_drains_the_queue_and_keeps_failures(input_copy, tmp_path):
         assert len(list(folder.glob("*DYDefinitions.md"))) == 1
     log = next(output.glob("*.md")).read_text(encoding="utf-8")
     assert "Hialeah" in log and "left in the input queue" in log
+    assert "moved out of the input queue: yes" in log
 
 
 def test_cli_second_run_same_day_creates_v2(input_copy, tmp_path):
     output = tmp_path / "Review Output"
-    run(["--input-dir", str(input_copy), "--output-dir", str(output), "--quiet", "--loan", "Strada"])
-    run(["--input-dir", str(input_copy), "--output-dir", str(output), "--quiet", "--loan", "Strada"])
+    for _ in range(2):
+        run([
+            "--input-dir", str(input_copy),
+            "--output-dir", str(output),
+            "--no-move", "--quiet", "--loan", "Strada",
+        ])
     folders = sorted(p.name for p in output.iterdir() if p.is_dir())
     assert len(folders) == 2
     assert folders[0].endswith("v1") and folders[1].endswith("v2")

@@ -34,7 +34,7 @@ def build_summary(
         f"- Input folder: `{input_dir}`",
         f"- Output folder: `{output_dir}`",
         f"- Loans processed: {len(results)} ({len(succeeded)} succeeded, {len(failed)} failed)",
-        f"- Source files moved out of the input queue: {'yes' if moved else 'no (--move not set)'}",
+        f"- Source files moved out of the input queue: {'yes' if moved else 'no (--no-move)'}",
         "",
     ]
 

@@ -2,6 +2,10 @@
 
 Everything here runs against copies in tmp_path. The move logic deletes from the
 input folder, so no test may point at the repository's own files.
+
+Every CLI invocation passes --no-llm. These tests assert on the deterministic
+output, and they must run with no API key and no network; the revenue review is
+covered separately in test_llm.py against a stubbed client.
 """
 
 from __future__ import annotations
@@ -87,10 +91,25 @@ def workbook_for(audited, tmp_path):
     return build
 
 
-def test_findings_workbook_has_the_four_sheets(workbook_for):
+def test_findings_workbook_has_the_five_sheets(workbook_for):
     wb, path = workbook_for("Hialeah")
-    assert wb.sheetnames == ["Summary", "Findings", "Rent Roll Rebuild", "Loan Parameters"]
+    assert wb.sheetnames == [
+        "Summary",
+        "Findings",
+        "Rent Roll Rebuild",
+        "Revenue Review",
+        "Loan Parameters",
+    ]
     assert path.exists() and path.stat().st_size > 0
+
+
+def test_revenue_review_sheet_says_so_when_no_model_review_ran(workbook_for):
+    # These fixtures are audited with --no-llm, so the sheet exists but has no
+    # payload behind it. It must say which of the two reasons applies rather
+    # than sitting blank, which would read as a clean revenue section.
+    wb, _ = workbook_for("Hialeah")
+    text = wb["Revenue Review"].cell(row=1, column=1).value
+    assert "--no-llm" in text and "CHK_REVENUE_LLM" in text
 
 
 def test_findings_sheet_lists_every_finding_blockers_first(audited, workbook_for):
@@ -242,7 +261,7 @@ def test_failed_loan_keeps_its_sources_in_the_queue(input_copy, tmp_path):
 def test_cli_moves_the_queue_by_default(input_copy):
     # Moving is the default: the input folder is a queue of files not yet
     # reviewed, so a clean run should leave nothing behind but the output.
-    assert run(["--input-dir", str(input_copy), "--quiet"]) == 0
+    assert run(["--input-dir", str(input_copy), "--no-llm", "--quiet"]) == 0
     leftover = [p.name for p in input_copy.iterdir() if p.name != "DY Review Output"]
     assert leftover == []
     for folder in (input_copy / "DY Review Output").iterdir():
@@ -253,7 +272,7 @@ def test_cli_moves_the_queue_by_default(input_copy):
 
 def test_cli_no_move_leaves_the_input_folder_alone(input_copy):
     before = sorted(p.name for p in input_copy.iterdir())
-    assert run(["--input-dir", str(input_copy), "--no-move", "--quiet"]) == 0
+    assert run(["--input-dir", str(input_copy), "--no-move", "--no-llm", "--quiet"]) == 0
     after = sorted(p.name for p in input_copy.iterdir() if p.name != "DY Review Output")
     assert after == before
 
@@ -271,7 +290,7 @@ def test_cli_move_drains_the_queue_and_keeps_failures(input_copy, tmp_path):
     (input_copy / "3. Hialeah Industrial Park 1Q26 DY Test_vF vBCS.xlsx").write_text("broken")
     output = tmp_path / "Review Output"
     exit_code = run(
-        ["--input-dir", str(input_copy), "--output-dir", str(output), "--move", "--quiet"]
+        ["--input-dir", str(input_copy), "--output-dir", str(output), "--move", "--no-llm", "--quiet"]
     )
     assert exit_code == 1, "a failed loan must be reported through the exit code"
 
@@ -295,7 +314,7 @@ def test_cli_second_run_same_day_creates_v2(input_copy, tmp_path):
         run([
             "--input-dir", str(input_copy),
             "--output-dir", str(output),
-            "--no-move", "--quiet", "--loan", "Strada",
+            "--no-move", "--no-llm", "--quiet", "--loan", "Strada",
         ])
     folders = sorted(p.name for p in output.iterdir() if p.is_dir())
     assert len(folders) == 2
@@ -305,9 +324,9 @@ def test_cli_second_run_same_day_creates_v2(input_copy, tmp_path):
 def test_cli_reports_when_the_folder_holds_nothing(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert run(["--input-dir", str(empty), "--quiet"]) == 1
+    assert run(["--input-dir", str(empty), "--no-llm", "--quiet"]) == 1
     assert list((empty / "DY Review Output").glob("*.md"))
 
 
 def test_cli_rejects_a_missing_input_folder(tmp_path):
-    assert run(["--input-dir", str(tmp_path / "nope"), "--quiet"]) == 2
+    assert run(["--input-dir", str(tmp_path / "nope"), "--no-llm", "--quiet"]) == 2

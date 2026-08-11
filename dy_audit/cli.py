@@ -15,6 +15,7 @@ from pathlib import Path
 from .audit import audit_loan
 from .discovery import discover
 from .filemove import finalise_loan
+from .llm import DEFAULT_EFFORT, DEFAULT_MODEL
 from .model import LoanResult, Severity, Status
 from .report import findings_filename, write_findings_workbook
 from .runlog import write_summary
@@ -61,6 +62,38 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="Review only loans whose name contains NAME. Repeatable.",
     )
+    parser.add_argument(
+        "--llm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Review the revenue line items - GPR, the rent roll behind it, vacancy, other "
+            "income, and the T12 reconciliation - with an LLM, which reads the workbook "
+            "itself and can trace formulas across tabs. On by default. Pass --no-llm to fall "
+            "back to the deterministic revenue checks, which need no API key and no network."
+        ),
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=("anthropic", "openai"),
+        default="anthropic",
+        help="Which API serves the revenue review. Default: anthropic.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        metavar="MODEL",
+        help=f"Model for the revenue review. Default: {DEFAULT_MODEL}.",
+    )
+    parser.add_argument(
+        "--llm-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=DEFAULT_EFFORT,
+        help=(
+            f"Reasoning effort for the revenue review. Default: {DEFAULT_EFFORT}. Lower it to "
+            "cut cost; tracing a formula chain across tabs is what the higher settings buy."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="Suppress per-loan console output.")
     return parser
 
@@ -75,7 +108,11 @@ def _summarise(result: LoanResult) -> str:
         return f"FAILED - {result.error}"
     counts = result.count_by_severity()
     dy = result.facts.get("debt_yield")
-    review = sum(1 for f in result.findings if f.status is Status.MANUAL_REVIEW)
+    review = sum(
+        1
+        for f in result.findings
+        if f.status in (Status.MANUAL_REVIEW, Status.UNVERIFIABLE)
+    )
     parts = [f"DY {dy:.4%}" if dy is not None else "DY not read"]
     for severity in (Severity.BLOCKER, Severity.HIGH, Severity.MEDIUM, Severity.LOW):
         if counts.get(severity):
@@ -115,7 +152,13 @@ def run(argv: list[str] | None = None) -> int:
     for pair in pairs:
         # Each loan is isolated: a workbook that cannot be read is recorded as
         # this loan's failure and leaves its source files in the queue.
-        result = audit_loan(pair)
+        result = audit_loan(
+            pair,
+            use_llm=args.llm,
+            llm_provider=args.llm_provider,
+            llm_model=args.llm_model,
+            llm_effort=args.llm_effort,
+        )
         results.append(result)
         try:
             findings_path = output_dir / findings_filename(result.loan_name, run_date)

@@ -11,7 +11,8 @@ from .checks.medium import run_medium
 from .checks.standing import run_standing
 from .context import LoanContext
 from .definitions import parse_definitions
-from .model import LoanFiles, LoanResult
+from .llm import REVENUE_CHECK_IDS, review_revenue_with_llm
+from .model import Finding, LoanFiles, LoanResult
 from .osar import Line, select_osar
 from .rebuild import run_rebuild
 from .recompute import run_recompute
@@ -50,7 +51,25 @@ def collect_facts(ctx: LoanContext) -> dict:
     return facts
 
 
-def audit_loan(files: LoanFiles) -> LoanResult:
+def _keep(finding: Finding, use_llm: bool) -> bool:
+    """Whether a deterministic finding survives to the report.
+
+    With the LLM review on, the revenue checks still run - they build the
+    rent-roll rebuild the report renders and the source tabs later checks read -
+    but their verdicts give way to the model's, so a loan is never reported
+    twice for the same defect under the same check ID.
+    """
+    return not (use_llm and finding.check_id in REVENUE_CHECK_IDS)
+
+
+def audit_loan(
+    files: LoanFiles,
+    *,
+    use_llm: bool = False,
+    llm_provider: str = "anthropic",
+    llm_model: str | None = None,
+    llm_effort: str = "xhigh",
+) -> LoanResult:
     """Run the full check suite for one loan.
 
     Wrapped so a workbook that cannot be read is recorded as this loan's failure
@@ -65,28 +84,37 @@ def audit_loan(files: LoanFiles) -> LoanResult:
             wb=wb,
             tab=select_osar(wb),
             params=parse_definitions(files.defs_path, files.loan_name),
+            use_llm=use_llm,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_effort=llm_effort,
         )
         # Order matters: blockers record the UPB reference and the period check
         # records the source tabs, both of which later checks reuse.
-        for finding in run_blockers(ctx):
-            result.add(finding)
-        for finding in run_high(ctx):
-            result.add(finding)
-        for finding in run_recompute(ctx):
-            result.add(finding)
+        stages = (run_blockers, run_high, run_recompute, run_rebuild, run_medium,
+                  run_low, run_standing)
         # The rebuild reuses the recompute's parse as its fallback, so it runs after.
-        for finding in run_rebuild(ctx):
-            result.add(finding)
-        for finding in run_medium(ctx):
-            result.add(finding)
-        for finding in run_low(ctx):
-            result.add(finding)
-        for finding in run_standing(ctx):
-            result.add(finding)
+        for stage in stages:
+            for finding in stage(ctx):
+                if _keep(finding, use_llm):
+                    result.add(finding)
+
+        # Revenue last: it reads the rebuild and source tabs the stages above
+        # produced, and reports against them.
+        if use_llm:
+            for finding in review_revenue_with_llm(
+                ctx,
+                provider=llm_provider,
+                model=llm_model,
+                effort=llm_effort,
+            ):
+                result.add(finding)
 
         result.facts = collect_facts(ctx)
         result.facts["params"] = ctx.params
         result.facts["rebuilds"] = ctx.facts.get("rebuilds") or []
+        result.facts["llm_usage"] = ctx.facts.get("llm_usage")
+        result.facts["revenue_review"] = ctx.facts.get("revenue_review")
     except Exception as exc:  # noqa: BLE001 - one loan's failure must not stop the run
         result.error = f"{type(exc).__name__}: {exc}"
         result.facts["traceback"] = traceback.format_exc()

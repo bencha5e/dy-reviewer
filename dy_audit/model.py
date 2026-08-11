@@ -107,11 +107,19 @@ class LoanResult:
         return [f for f in self.findings if f.is_flag()]
 
     def count_by_severity(self) -> dict[Severity, int]:
+        """Findings that need a reviewer's attention, by severity.
+
+        UNVERIFIABLE counts alongside FLAG and MANUAL_REVIEW. A check the tool
+        could not complete must never read as a clean pass, and leaving it out
+        of the headline counts is exactly that - a loan whose whole revenue
+        review failed would otherwise summarise as quietly as a clean one.
+        """
         counts: dict[Severity, int] = {}
         for f in self.findings:
-            if f.status in (Status.FLAG, Status.MANUAL_REVIEW) or f.severity in (
-                Severity.STANDING,
-                Severity.INFO,
-            ):
+            if f.status in (
+                Status.FLAG,
+                Status.MANUAL_REVIEW,
+                Status.UNVERIFIABLE,
+            ) or f.severity in (Severity.STANDING, Severity.INFO):
                 counts[f.severity] = counts.get(f.severity, 0) + 1
         return counts

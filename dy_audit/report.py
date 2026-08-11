@@ -405,6 +405,7 @@ _TERM_SHEET_ROWS = [
     ("new_lease_window_days", "New / signed lease window (days)"),
     ("concessions_basis", "Concessions basis"),
     ("other_income_basis", "Other income basis"),
+    ("tenant_status_screens", "Tenant-status screens stated"),
 ]
 
 _REVIEW_REBUILD_COLUMNS = [

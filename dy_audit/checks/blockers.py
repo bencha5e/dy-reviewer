@@ -15,15 +15,22 @@ from ..context import LoanContext
 from ..model import Finding, Severity, Status
 from ..osar import Line, normalize_label
 
-#: Occupancy scenarios for the vacancy sign test (spec section 5, rule 4).
-#: 0.95 is evaluated and reported but never flagged: it is the exact boundary
-#: where "greater of actual or 5%" is satisfied by either reading, and the four
-#: models legitimately disagree there.
-OCCUPANCY_SCENARIOS = (1.00, 0.97, 0.95, 0.92)
-_BOUNDARY = 0.95
+#: Default floor used only when the loan agreement could not be parsed. The
+#: floor is loan-specific and must normally come from the definitions file.
+DEFAULT_VACANCY_FLOOR = 0.05
 
 #: A vacancy line this close to zero counts as zero (floating point leaves -0.0).
 _ZERO_TOL = 0.01
+
+
+def occupancy_scenarios(threshold: float) -> tuple[float, ...]:
+    """Occupancy points to test, positioned around the loan's own threshold.
+
+    At and below the threshold the vacancy line must be zero, because "greater
+    of actual vacancy or the floor" is already satisfied by actual vacancy, and
+    in-place GPR already reflects it. Above the threshold the line must deduct.
+    """
+    return (1.00, min(1.0, threshold + 0.02), threshold, max(0.0, threshold - 0.03))
 
 #: An invoice term smaller than this share of the T12 term can never win the
 #: MAX, which means the MAX is decorative. Ares's broken term is ~7e-13 of T12,
@@ -290,8 +297,15 @@ def check_vacancy_sign(ctx: LoanContext) -> list[Finding]:
         if occ_key in F.dependencies(wb, sheet, cell):
             dependents.add(key)
 
+    floor = (
+        ctx.params.vacancy_floor.value
+        if ctx.params and ctx.params.vacancy_floor.found
+        else DEFAULT_VACANCY_FLOOR
+    )
+    threshold = 1.0 - floor
+
     results: dict[float, float] = {}
-    for occ in OCCUPANCY_SCENARIOS:
+    for occ in occupancy_scenarios(threshold):
         resolver = F.make_resolver(wb, overrides={occ_key: occ}, recompute=dependents)
         try:
             results[occ] = F.to_number(F.evaluate(res.formula, res.sheet, resolver))
@@ -310,22 +324,33 @@ def check_vacancy_sign(ctx: LoanContext) -> list[Finding]:
                 )
             ]
 
-    trace = ", ".join(f"{occ:.0%} -> {val:,.2f}" for occ, val in results.items())
-    evidence = f"{res.ref}{via} = {F.normalize(res.formula)} | occupancy test: {trace}"
+    trace = ", ".join(f"{occ:.2%} -> {val:,.2f}" for occ, val in results.items())
+    evidence = (
+        f"{res.ref}{via} = {F.normalize(res.formula)} | floor {floor:.2%} "
+        f"(threshold {threshold:.2%}) | occupancy test: {trace}"
+    )
     problems: list[str] = []
 
     for occ, val in results.items():
-        if occ == _BOUNDARY:
-            continue  # exact-floor boundary: reported, never flagged
-        if occ > _BOUNDARY and val > -_ZERO_TOL:
+        if occ > threshold and val > -_ZERO_TOL:
             problems.append(
-                f"at {occ:.0%} occupancy the line is {val:,.2f}, which "
+                f"at {occ:.2%} occupancy the line is {val:,.2f}, which "
                 f"{'raises' if val > _ZERO_TOL else 'does not reduce'} EGI instead of deducting"
             )
-        elif occ < _BOUNDARY and abs(val) > _ZERO_TOL:
+        elif occ <= threshold and abs(val) > _ZERO_TOL:
+            # Includes the threshold itself: at exactly 1 - floor, actual vacancy
+            # equals the floor, so "greater of" is satisfied by actual vacancy,
+            # which in-place GPR already reflects. Anything else double-counts.
+            at_boundary = abs(occ - threshold) < 1e-9
             problems.append(
-                f"at {occ:.0%} occupancy the line is {val:,.2f}, but actual vacancy already "
-                f"exceeds the 5% floor so it must be 0"
+                f"at {occ:.2%} occupancy the line is {val:,.2f}, but actual vacancy "
+                f"{'equals' if at_boundary else 'already exceeds'} the {floor:.2%} floor, "
+                f"so it must be 0"
+                + (
+                    " - the branch uses a strict comparison and deducts at the boundary"
+                    if at_boundary
+                    else ""
+                )
             )
 
     if problems:

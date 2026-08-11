@@ -127,6 +127,35 @@ def iter_refs(formula: str | None) -> list[Ref]:
     return refs
 
 
+def iter_refs_positioned(formula: str | None) -> list[tuple[Ref, int, int]]:
+    """Every reference plus its (start, end) offset in the normalized formula.
+
+    Needed to tell whether a term is added or subtracted, which is how the GPR
+    check spots a delinquency adjustment pointing the wrong way.
+    """
+    text = strip_strings(normalize(formula))
+    out: list[tuple[Ref, int, int]] = []
+    for m in _REF_RE.finditer(text):
+        sheet_raw = m.group("sheet")
+        external = None
+        if sheet_raw:
+            ext = _EXTERNAL_RE.search(sheet_raw)
+            if ext:
+                external = int(ext.group(1))
+                sheet_raw = _EXTERNAL_RE.sub("", sheet_raw)
+        out.append((Ref(unquote_sheet(sheet_raw), m.group("body"), external), m.start(), m.end()))
+    return out
+
+
+def term_sign(formula: str | None, start: int) -> int:
+    """+1 or -1 for the term beginning at `start` in the normalized formula."""
+    text = strip_strings(normalize(formula))
+    i = start - 1
+    while i >= 0 and text[i] in " \t(":
+        i -= 1
+    return -1 if i >= 0 and text[i] == "-" else 1
+
+
 def function_names(formula: str | None) -> list[str]:
     """Uppercase names of functions called in the formula."""
     text = strip_strings(normalize(formula))

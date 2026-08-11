@@ -21,6 +21,7 @@ from dy_audit.checks.blockers import (
     run_blockers,
 )
 from dy_audit.context import LoanContext
+from dy_audit.definitions import parse_definitions
 from dy_audit.discovery import discover
 from dy_audit.model import Status
 from dy_audit.osar import Line, select_osar
@@ -56,11 +57,14 @@ EXPECTED = {
         "CHK_DY_BASIS": PASS,
         "CHK_DY_CONSISTENCY": FLAG,
     },
-    # A-2 insurance invoice term broken; vacancy floor correctly bites at 100%.
+    # A-2 insurance invoice term broken. Vacancy flags at the boundary: the
+    # branch uses a strict `<95%`, so at exactly 95% occupancy it deducts where
+    # the line must be 0. Spec section 6 marks this correct; the deliberate
+    # divergence was ruled on during the build.
     "Ares55thAve": {
         "CHK_TAX_MAX": PASS,
         "CHK_INS_MAX": FLAG,
-        "CHK_VACANCY_SIGN": PASS,
+        "CHK_VACANCY_SIGN": FLAG,
         "CHK_DY_BASIS": PASS,
         "CHK_DY_CONSISTENCY": PASS,
     },
@@ -75,7 +79,12 @@ def contexts():
     opened = {}
     for pair in pairs:
         wb = Workbook(pair.xlsx_path)
-        opened[pair.loan_name] = LoanContext(files=pair, wb=wb, tab=select_osar(wb))
+        opened[pair.loan_name] = LoanContext(
+            files=pair,
+            wb=wb,
+            tab=select_osar(wb),
+            params=parse_definitions(pair.defs_path, pair.loan_name),
+        )
     yield opened
     for ctx in opened.values():
         ctx.wb.close()
@@ -99,8 +108,8 @@ def test_blocker_statuses_match_q1_2026_findings(results, loan):
     assert actual == EXPECTED[loan]
 
 
-def test_exactly_four_blocker_flags_across_the_portfolio(results):
-    # S-1, S-3, H-4 and A-2 - no more, no fewer.
+def test_exactly_five_blocker_flags_across_the_portfolio(results):
+    # S-1, S-3, H-4, A-2, plus Ares's boundary defect - no more, no fewer.
     flagged = {
         (loan, f.check_id)
         for loan, findings in results.items()
@@ -112,6 +121,7 @@ def test_exactly_four_blocker_flags_across_the_portfolio(results):
         ("Strada", "CHK_VACANCY_SIGN"),
         ("Hialeah", "CHK_DY_CONSISTENCY"),
         ("Ares55thAve", "CHK_INS_MAX"),
+        ("Ares55thAve", "CHK_VACANCY_SIGN"),
     }
 
 
@@ -194,7 +204,7 @@ def test_strada_vacancy_adds_income_above_95_percent(contexts):
 
 
 @pytest.mark.parametrize("loan", ["Campus at Villa La Jolla", "Hialeah", "Ares55thAve"])
-def test_correct_vacancy_formulas_deduct_and_zero_out(contexts, loan):
+def test_vacancy_formulas_deduct_above_the_floor_and_zero_below(contexts, loan):
     trace = _vacancy_trace(contexts[loan])
     assert trace[1.00] < 0, "above the floor the line must reduce EGI"
     assert trace[0.97] < 0

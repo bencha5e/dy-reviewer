@@ -59,7 +59,13 @@ def build_summary(
         for result in sorted(succeeded, key=lambda r: r.loan_name):
             dy = result.facts.get("debt_yield")
             counts = result.count_by_severity()
-            review = sum(1 for f in result.findings if f.status is Status.MANUAL_REVIEW)
+            # UNVERIFIABLE counts too: a check that could not run needs a human
+            # just as much as one that returned an ambiguous answer.
+            review = sum(
+                1
+                for f in result.findings
+                if f.status in (Status.MANUAL_REVIEW, Status.UNVERIFIABLE)
+            )
             yield_text = f"{dy:.4%}" if dy is not None else "not read"
             lines.append(
                 f"| {result.loan_name} | {yield_text} | {counts.get(Severity.BLOCKER, 0)} | "

@@ -24,6 +24,15 @@ class LoanContext:
     #: Scratch space for facts one stage learns and a later stage reuses
     #: (the UPB cell found by CHK_DY_BASIS, the occupancy driver, ...).
     facts: dict = field(default_factory=dict)
+    #: When set, the revenue line items are reviewed by an LLM and the
+    #: deterministic revenue findings are dropped in favour of its verdict.
+    #: The deterministic revenue checks still *run* either way: they produce the
+    #: rent-roll rebuild the report renders and the source tabs later stages
+    #: read, so only their findings are suppressed, never their side effects.
+    use_llm: bool = False
+    llm_provider: str = "anthropic"
+    llm_model: str | None = None
+    llm_effort: str = "xhigh"
 
     @property
     def loan_name(self) -> str:

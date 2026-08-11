@@ -21,10 +21,12 @@ line overstates it on every loan.
 
 ```bash
 pip install -r requirements.txt
+export ANTHROPIC_API_KEY=...                                   # for the revenue review
 
 python audit_dy.py --input-dir "…/Input DY Tests"              # review and drain the queue
 python audit_dy.py --input-dir "…/Input DY Tests" --no-move    # review in place, change nothing
 python audit_dy.py --input-dir "…" --loan Strada               # one loan
+python audit_dy.py --input-dir "…" --no-llm                    # deterministic only, no network
 ```
 
 One run reviews every loan pair in the folder. Each loan is processed
@@ -46,22 +48,74 @@ reviewed: after a clean run it holds nothing but the output folder. A loan that
 Use `--no-move` to review in place and leave the folder exactly as it was, which
 is the safe way to preview a run.
 
+## How the work is split
+
+Two engines, one report.
+
+**Python does everything mechanical** — cell errors, date and period alignment,
+cross-footing, the expense side, the reserve rate, the management-fee base, link
+targets, month counts. This is arithmetic against a known rule, and code does it
+more cheaply and more reliably than a model would.
+
+**An LLM reviews the revenue lines** — gross potential rent and the rent roll
+behind it, vacancy, other income, and the T12 reconciliation. That work is
+judgment rather than arithmetic: whether a Pending-renewal row duplicates a unit
+already counted, whether pet rent belongs inside base rent, whether a formula
+cell in an exported column is a backfill or a correction. Every one of those took
+a bespoke heuristic to catch, and the next workbook shape needed another.
+
+The workbook goes to the model as a real `.xlsx`, uploaded through the Files API
+and attached as a `container_upload`, so it lands on the filesystem of the code
+execution sandbox. The model reads it with openpyxl the same way this package
+does — `data_only=False` for formulas, `data_only=True` for cached values — and
+can follow a `SUMIF` into the rent roll rather than reasoning over a flat dump.
+The workbook never enters the context window, which is what keeps the cost down.
+The rules it works from live in `DY_Revenue_Reviewer_System_Prompt_LLM.md`, sent
+as a cached prompt prefix so the second and later loans in a run don't pay for it
+again.
+
+Findings come back as JSON against a schema that mirrors the `Finding` dataclass,
+so they merge into the same list, sort by the same key, and render into the same
+workbook as the deterministic ones. The output format is unchanged.
+
+`--no-llm` falls back to the deterministic revenue checks, which are still in the
+codebase and still tested. It needs no API key and no network — use it for
+offline runs and for reproducing a prior quarter's output exactly.
+
+**A revenue review that cannot run is never silent.** If the API call fails, the
+key is missing, or the rules file is absent, the loan still produces its full
+deterministic report plus one `CHK_REVENUE_LLM` finding at HIGH/UNVERIFIABLE
+saying the revenue lines are outstanding. It is counted in the severity totals
+and coloured distinctly from a pass.
+
 ## What it checks
 
-A hybrid: it verifies the model's own formulas and links line by line, and
-independently rebuilds two lines — gross potential rent and vacancy — from the
-rent roll. Ordinary operating expenses are verified as a T12 pass-through rather
-than rebuilt.
+It verifies the model's own formulas and links line by line, and independently
+rebuilds two lines — gross potential rent and vacancy — from the rent roll.
+Ordinary operating expenses are verified as a T12 pass-through rather than
+rebuilt.
+
+Checks marked ✳︎ are the revenue set. With the LLM review on they are answered by
+the model; with `--no-llm` the deterministic implementations answer them instead.
+Either way they appear under the same check IDs, so the report reads the same.
 
 | Severity | Checks |
 |---|---|
-| BLOCKER | tax MAX, insurance MAX, vacancy sign, DY basis, DY consistency |
-| HIGH | vacancy floor, double-counted vacancy, period tie-out, reserve rate, management-fee base, other-income basis, exclusions, month count, GPR and vacancy recompute, rent-status inclusion, prior-quarter GPR trend, revenue double-count, rent-roll rebuild, rent-column edits, export-total tie, supplementary-income-in-GPR |
+| BLOCKER | tax MAX, insurance MAX, ✳︎vacancy sign, DY basis, DY consistency |
+| HIGH | ✳︎vacancy floor, ✳︎double-counted vacancy, period tie-out, reserve rate, management-fee base, ✳︎other-income basis, ✳︎exclusions, month count, ✳︎GPR and vacancy recompute, ✳︎rent-status inclusion, ✳︎prior-quarter GPR trend, ✳︎revenue double-count, ✳︎rent-roll rebuild, ✳︎rent-column edits, ✳︎export-total tie, ✳︎supplementary-income-in-GPR |
 | MEDIUM | external references, link targets, reference-column source, unit/SF tie, duplicate tabs |
 | LOW | cached error cells, hardcoded plugs, short-history annualisers |
 | STANDING | UPB confirmation — emitted every run |
 
-**The rent roll is rebuilt from scratch on every run.** The tool finds the
+Period tie-out, month count and the management-fee base stay with Python even
+though they touch revenue. They are a date comparison, a divisor against
+months-with-data, and a formula's base reference — arithmetic, not judgment.
+
+**The rent roll is rebuilt from scratch on every run**, under both settings. The
+deterministic rebuild keeps running with the LLM review on: it produces the Rent
+Roll Rebuild tab and the source-tab resolution later checks depend on, and it
+goes to the model as a second opinion to agree or disagree with. What changes is
+only who reaches the verdict. The tool finds the
 tenant table by its own headers — never by trusting the model's formulas —
 identifies the tenant-rent column, decides which tenants belong in base rent,
 and writes the whole thing to a **Rent Roll Rebuild** tab in the findings

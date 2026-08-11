@@ -258,13 +258,22 @@ def resolve_defining_formula(
 
 
 def dependencies(
-    wb: Workbook, sheet: str, coord: str, max_depth: int = 6
+    wb: Workbook,
+    sheet: str,
+    coord: str,
+    max_depth: int = 6,
+    expand_ranges: bool = False,
 ) -> dict[str, tuple[str, str]]:
     """Transitive single-cell dependencies of a formula.
 
-    Returns `{"Sheet!Coord": (sheet, coord)}`. Ranges are skipped: nothing on the
-    occupancy path in these models depends on one, and expanding whole-column
-    references would be both slow and meaningless.
+    Returns `{"Sheet!Coord": (sheet, coord)}`. Ranges are skipped by default:
+    nothing on the occupancy path depends on one, and expanding a whole-column
+    reference would be both slow and meaningless.
+
+    Set `expand_ranges` when the chain runs *through* a small range, as Strada's
+    other-income line does (`R55 = SUM(R52:R53)`); without it the walk stops at
+    the range and never reaches the annualisers underneath. Whole-column and
+    oversized ranges are still skipped.
     """
     found: dict[str, tuple[str, str]] = {}
     frontier = [(sheet, coord.replace("$", "").upper(), 0)]
@@ -280,7 +289,16 @@ def dependencies(
         if formula is None:
             continue
         for ref in iter_refs(formula):
-            if ref.is_range or ref.external_index is not None:
+            if ref.external_index is not None:
+                continue
+            if ref.is_range:
+                if not expand_ranges:
+                    continue
+                for dep_sheet, dep_coord in expand_range(ref, cur_sheet, limit=60):
+                    if not wb.has_sheet(dep_sheet):
+                        continue
+                    found[f"{dep_sheet}!{dep_coord}"] = (dep_sheet, dep_coord)
+                    frontier.append((dep_sheet, dep_coord, depth + 1))
                 continue
             dep_sheet = ref.resolved_sheet(cur_sheet)
             if not wb.has_sheet(dep_sheet):

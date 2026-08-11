@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import re
 import traceback
 
-from . import formula as F
 from .checks.blockers import run_blockers
 from .checks.high import run_high
 from .checks.low import run_low
@@ -13,88 +11,10 @@ from .checks.medium import run_medium
 from .checks.standing import run_standing
 from .context import LoanContext
 from .definitions import parse_definitions
-from .model import Finding, LoanFiles, LoanResult, Severity, Status
+from .model import LoanFiles, LoanResult
 from .osar import Line, select_osar
 from .recompute import run_recompute
 from .workbook import Workbook
-
-#: Label vocabulary that marks a covenant level rather than a computed yield.
-_THRESHOLD_LABEL = re.compile(
-    r"\b(event|threshold|covenant|minimum|min|required|hurdle|trigger|target)\b", re.I
-)
-_DY_LABEL = re.compile(r"debt yield|(^|\b)dy\b", re.I)
-
-
-def find_covenant_threshold(ctx: LoanContext) -> tuple[float, str] | None:
-    """Locate the debt-yield covenant level, if the workbook states one.
-
-    Only a labelled literal on a tab other than the OSAR counts. The OSAR's own
-    columns E-G hold prior and at-contribution debt yields, which look like
-    thresholds but are history - reading one as a covenant would produce a
-    confident and wrong pass/fail.
-    """
-    from openpyxl.utils import column_index_from_string, get_column_letter
-
-    wb, tab = ctx.wb, ctx.tab
-    for sheet in wb.sheet_names:
-        if sheet == tab.sheet or not wb.is_visible(sheet):
-            continue
-        for coord, _formula, value in wb.iter_cells(sheet, max_row=120, max_col=25):
-            if not isinstance(value, str):
-                continue
-            label = value.strip()
-            if not _DY_LABEL.search(label) or not _THRESHOLD_LABEL.search(label):
-                continue
-            m = re.match(r"([A-Z]+)(\d+)", coord)
-            if not m:
-                continue
-            index = column_index_from_string(m.group(1))
-            for step in range(1, 6):
-                near = f"{get_column_letter(index + step)}{m.group(2)}"
-                number = wb.number(sheet, near)
-                if number is not None and 0 < number < 1.0 and wb.formula(sheet, near) is None:
-                    return number, f"{sheet}!{near} ({label})"
-    return None
-
-
-def _covenant_findings(ctx: LoanContext, dy: float | None) -> list[Finding]:
-    """Compare the reported debt yield to the covenant level."""
-    threshold = find_covenant_threshold(ctx)
-    if dy is None:
-        return []
-    if threshold is None:
-        return [
-            Finding(
-                "CHK_COVENANT",
-                Severity.INFO,
-                Status.MANUAL_REVIEW,
-                f"Reported debt yield is {dy:.4%}. No covenant threshold is stated anywhere in "
-                f"this workbook, so pass/fail could not be determined - confirm the level and "
-                f"its effective date from the loan documents. (The OSAR's own columns E-G hold "
-                f"prior and at-contribution debt yields, not a covenant level.)",
-                sheet=ctx.tab.sheet,
-                cell=ctx.tab.cell(Line.DEBT_YIELD),
-                on_dy_path=True,
-            )
-        ]
-
-    level, where = threshold
-    passing = dy >= level
-    return [
-        Finding(
-            "CHK_COVENANT",
-            Severity.INFO if passing else Severity.HIGH,
-            Status.PASS if passing else Status.FLAG,
-            f"Reported debt yield {dy:.4%} "
-            f"{'clears' if passing else 'is below'} the {level:.4%} covenant level by "
-            f"{abs(dy - level) * 100:.2f} basis points x100. Confirm the level's effective date - "
-            f"a threshold not yet in force does not bind.",
-            sheet=ctx.tab.sheet,
-            cell=ctx.tab.cell(Line.DEBT_YIELD),
-            evidence=f"threshold read from {where}",
-            on_dy_path=True,
-        )
-    ]
 
 
 def collect_facts(ctx: LoanContext) -> dict:
@@ -126,9 +46,6 @@ def collect_facts(ctx: LoanContext) -> dict:
             if value is not None:
                 facts["occupancy"] = value
                 break
-    threshold = find_covenant_threshold(ctx)
-    facts["covenant"] = threshold[0] if threshold else None
-    facts["covenant_source"] = threshold[1] if threshold else None
     return facts
 
 
@@ -164,8 +81,6 @@ def audit_loan(files: LoanFiles) -> LoanResult:
             result.add(finding)
 
         result.facts = collect_facts(ctx)
-        for finding in _covenant_findings(ctx, result.facts.get("debt_yield")):
-            result.add(finding)
         result.facts["params"] = ctx.params
     except Exception as exc:  # noqa: BLE001 - one loan's failure must not stop the run
         result.error = f"{type(exc).__name__}: {exc}"
@@ -176,4 +91,4 @@ def audit_loan(files: LoanFiles) -> LoanResult:
     return result
 
 
-__all__ = ["audit_loan", "collect_facts", "find_covenant_threshold", "F"]
+__all__ = ["audit_loan", "collect_facts"]

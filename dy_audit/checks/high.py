@@ -713,62 +713,135 @@ def check_mgmt_base(ctx: LoanContext) -> list[Finding]:
 # CHK_OTHER_INCOME_BASIS
 # ---------------------------------------------------------------------------
 
-#: Basis keywords per loan, taken from the definition text.
-_T3_HINT = re.compile(r"trailing three-month|trailing 3", re.I)
+#: Tabs that hold trailing-twelve actuals under one name or another. A workbook
+#: can carry several - Ares has both "Actuals (T12)" and "T12".
+_T12_TAB = re.compile(r"t-?12|ttm|trailing|operating statement", re.I)
+
+#: `SUM(range)*4` annualises a 3-month window; `SUM(range)/N*12` annualises N.
+_TIMES = re.compile(r"\)\s*\*\s*(\d+(?:\.\d+)?)")
+_OVER_TIMES_12 = re.compile(r"/\s*(\$?[A-Z]{1,3}\$?\d+|\d+(?:\.\d+)?)\s*\*\s*12")
+
+
+def _annualisation_months(wb, sheet: str, body: str) -> float | None:
+    """Months implied by an annualisation factor, or None if there isn't one."""
+    if "SUM(" not in body.upper():
+        return None
+    if m := _OVER_TIMES_12.search(body):
+        token = m.group(1)
+        if re.fullmatch(r"\$?[A-Z]{1,3}\$?\d+", token):
+            return wb.number(sheet, token.replace("$", ""))
+        return float(token)
+    if m := _TIMES.search(body):
+        factor = float(m.group(1))
+        return 12.0 / factor if factor else None
+    return None
 
 
 def check_other_income_basis(ctx: LoanContext) -> list[Finding]:
-    """Report the basis the model uses for other income against the agreement's."""
-    wb, tab = ctx.wb, ctx.tab
+    """The other-income line must be built on the window the agreement names.
+
+    Most loans put other income on a trailing twelve months, which is satisfied
+    by linking to a T12 tab. Strada is different: its agreement puts other income
+    on a trailing three-month total annualised and concessions on a trailing six,
+    so the check follows the line into the operating statement and reads the
+    annualisation factors actually applied there.
+    """
+    wb, tab, params = ctx.wb, ctx.tab, ctx.params
     coord = tab.cell(Line.OTHER_INCOME)
     if coord is None:
         return []
 
-    defs_text = ""
-    if ctx.files and ctx.files.defs_path.exists():
-        defs_text = ctx.files.defs_path.read_text(encoding="utf-8", errors="replace")
-    expected = "trailing 3-month annualized" if _T3_HINT.search(defs_text) else "trailing 12-month"
+    expected: dict[str, int] = {}
+    if params and params.other_income_months.found:
+        expected["other income"] = int(params.other_income_months.value)
+    if params and params.concession_months.found:
+        expected["concessions"] = int(params.concession_months.value)
 
     res = F.resolve_defining_formula(wb, tab.sheet, coord)
-    sources = []
+    # Use the resolution path as well as the final formula: a line that passes
+    # straight through to a literal on the T12 tab leaves no refs to read.
+    sheets = {hop.rsplit("!", 1)[0] for hop in res.path}
+    sources: list[str] = []
     for ref in F.iter_refs(res.formula):
         sheet = ref.resolved_sheet(res.sheet)
+        sheets.add(sheet)
         label = nearby_label(ctx, sheet, ref.coord) if not ref.is_range else None
         sources.append(f"{sheet}!{ref.body}" + (f" ({label})" if label else ""))
 
-    tabs = ctx.facts.get("source_tabs") or source_tabs(ctx)
-    t12_tab = tabs.get("t12")
-    # A workbook can hold several trailing-twelve tabs under different names -
-    # Ares has both "Actuals (T12)" and "T12" - so any of them counts as a T12
-    # source, not only the one column H happens to link to.
-    t12_like = re.compile(r"t-?12|ttm|trailing|operating statement", re.I)
-    references_t12 = any(
-        (t12_tab and t12_tab in s) or t12_like.search(s.split("!")[0]) for s in sources
-    )
-    evidence = f"{res.ref} = {F.normalize(res.formula)} | sources: {sources}"
+    if not expected:
+        return [
+            Finding(
+                "CHK_OTHER_INCOME_BASIS",
+                Severity.HIGH,
+                Status.MANUAL_REVIEW,
+                "The loan agreement's basis for other income could not be parsed, so the "
+                "model's source was not compared against it.",
+                sheet=tab.sheet,
+                cell=coord,
+                evidence=f"{res.ref} = {F.normalize(res.formula)}",
+                on_dy_path=True,
+            )
+        ]
 
-    # Only a clear contradiction is worth a flag; anything ambiguous goes to the
-    # reviewer rather than guessing at a tab's column semantics.
-    if expected.startswith("trailing 12") and references_t12:
-        status, message = Status.PASS, (
-            f"Other income is drawn from the T12 tab {t12_tab!r}, matching the loan "
-            f"agreement's {expected} basis."
-        )
+    wanted = sorted(set(expected.values()))
+    described = ", ".join(f"{k} on T{v}" for k, v in expected.items())
+
+    # Trailing-twelve is satisfied by linking to a trailing-twelve tab.
+    if wanted == [12]:
+        hit = next((s for s in sheets if s != tab.sheet and _T12_TAB.search(s)), None)
+        if hit:
+            return [
+                Finding(
+                    "CHK_OTHER_INCOME_BASIS",
+                    Severity.HIGH,
+                    Status.PASS,
+                    f"Other income is drawn from the trailing-twelve tab {hit!r}, matching the "
+                    f"loan agreement ({described}).",
+                    sheet=tab.sheet,
+                    cell=coord,
+                    evidence=f"{' -> '.join(res.path)} | sources: {sources}",
+                    on_dy_path=True,
+                )
+            ]
     else:
-        status, message = Status.MANUAL_REVIEW, (
-            f"The loan agreement specifies a {expected} basis for other income. Confirm the "
-            f"model's source matches - the tool reports the linkage but does not interpret "
-            f"the source tab's column periods."
-        )
+        # A shorter window has to be proved from the annualisation factors the
+        # supporting tab applies, not from which tab is referenced.
+        found: dict[float, str] = {}
+        # Strada's chain runs through `SUM(R52:R53)`, so the walk has to step
+        # into the range to reach the annualisers on the operating statement.
+        deps = F.dependencies(wb, res.sheet, res.coord, max_depth=5, expand_ranges=True)
+        deps[res.ref] = (res.sheet, res.coord)
+        for sheet, cell in deps.values():
+            body = F.normalize(wb.formula(sheet, cell))
+            months = _annualisation_months(wb, sheet, body) if body else None
+            if months:
+                found.setdefault(round(months, 3), f"{sheet}!{cell} = {body[:56]}")
+        if all(any(abs(m - want) < 0.01 for m in found) for want in wanted):
+            detail = "; ".join(f"{m:g} months from {where}" for m, where in sorted(found.items()))
+            return [
+                Finding(
+                    "CHK_OTHER_INCOME_BASIS",
+                    Severity.HIGH,
+                    Status.PASS,
+                    f"Other income is built on the windows the loan agreement names "
+                    f"({described}); the supporting tab annualises exactly those periods.",
+                    sheet=tab.sheet,
+                    cell=coord,
+                    evidence=f"{res.ref} = {F.normalize(res.formula)} | {detail}",
+                    on_dy_path=True,
+                )
+            ]
+
     return [
         Finding(
             "CHK_OTHER_INCOME_BASIS",
             Severity.HIGH,
-            status,
-            message,
+            Status.MANUAL_REVIEW,
+            f"The loan agreement puts {described}, but the tool could not confirm the model "
+            f"uses those windows. Check the source columns by hand.",
             sheet=tab.sheet,
             cell=coord,
-            evidence=evidence,
+            evidence=f"{' -> '.join(res.path)} | sources: {sources}",
             on_dy_path=True,
         )
     ]

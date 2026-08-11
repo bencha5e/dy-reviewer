@@ -60,6 +60,30 @@ _DELINQ_PAST_DUE = re.compile(r"(\d+)\s*-?\s*days?\s+past\s+due", re.IGNORECASE)
 #: Strada: no day count at all, only a requirement to be current.
 _DELINQ_CURRENT = re.compile(r"current on their rental obligations", re.IGNORECASE)
 
+#: Number words that appear in trailing-period clauses.
+_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+
+#: The fragment between a trailing-period phrase and the word "month". The count
+#: is written as a word ("three-month"), a numeral ("12-month"), or both
+#: ("twelve (12) month"), so the fragment is captured and parsed rather than
+#: matched three separate ways.
+_MONTH_FRAGMENT = r"([\w\s()-]{0,24}?)\s*-?\s*month"
+
+#: "the trailing three-month actual total, annualized" (Strada) or
+#: "other income based on the most recent twelve (12) month period" (the rest).
+_OTHER_INCOME_MONTHS = re.compile(
+    rf"(?:operating income \(excluding rents from leases\)[^.]{{0,60}}?trailing|"
+    rf"other income based on the most recent)\s+{_MONTH_FRAGMENT}",
+    re.IGNORECASE,
+)
+#: "concessions based on a trailing six-month actual total, annualized" (Strada).
+_CONCESSION_MONTHS = re.compile(
+    rf"concessions based on a trailing\s+{_MONTH_FRAGMENT}", re.IGNORECASE
+)
+
 _NEW_LEASE = re.compile(
     r"occupancy is expected to occur within\s*(\d+)\s*-?\s*days?", re.IGNORECASE
 )
@@ -84,6 +108,26 @@ _KNOWN_VACATE = re.compile(
 def _clean(text: str) -> str:
     """Undo the markdown escaping and collapse whitespace for matching."""
     return re.sub(r"\s+", " ", text.replace("\\", ""))
+
+
+def _months_from(pattern: re.Pattern, text: str) -> tuple[int, str] | None:
+    """Read a month count written as a word, a numeral, or both.
+
+    Agreements mix the forms freely: "trailing three-month", "twelve (12) month",
+    "12-month". The numeral wins when both are present.
+    """
+    m = pattern.search(text)
+    if not m:
+        return None
+    fragment = m.group(1) or ""
+    # A numeral is unambiguous, so it wins wherever the agreement gives both.
+    digits = re.search(r"\d+", fragment)
+    if digits:
+        return int(digits.group()), _quote(m)
+    for token in re.split(r"[\s()-]+", fragment.lower()):
+        if token in _WORD_NUMBERS:
+            return _WORD_NUMBERS[token], _quote(m)
+    return None
 
 
 def _quote(match: re.Match, width: int = 130) -> str:
@@ -120,6 +164,11 @@ def parse_definitions(path: Path, loan_name: str) -> LoanParams:
         params.delinquency = Parsed(int(m.group(1)), _quote(m))
     elif m := _DELINQ_CURRENT.search(text):
         params.delinquency = Parsed(CURRENT, _quote(m))
+
+    if months := _months_from(_OTHER_INCOME_MONTHS, text):
+        params.other_income_months = Parsed(*months)
+    if months := _months_from(_CONCESSION_MONTHS, text):
+        params.concession_months = Parsed(*months)
 
     if m := _NEW_LEASE.search(text):
         params.new_lease_days = Parsed(int(m.group(1)), _quote(m))

@@ -7,6 +7,11 @@ govern them, one Excel workbook per loan.
 Debt Yield = Net Cash Flow / Unpaid Principal Balance
 ```
 
+The question this answers is **whether the workbook is right and the debt yield
+is calculated correctly** — not whether the loan clears its covenant. Testing the
+reported yield against a threshold happens in a separate workflow, so nothing
+here compares one.
+
 NCF, not NOI. Each loan's definition of NOI already nets a replacement reserve,
 and these models place that reserve below the NOI line inside Capital Items — so
 the model's **NCF line is the definitional NOI**. Driving the yield off the NOI

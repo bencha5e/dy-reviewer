@@ -59,6 +59,11 @@ class LoanParams:
     #: requires tenants simply be current.
     delinquency: Parsed = field(default_factory=Parsed)
 
+    #: Trailing window for other income, in months, and for concessions where
+    #: the agreement puts them on a different window (Strada: T3 and T6).
+    other_income_months: Parsed = field(default_factory=Parsed)
+    concession_months: Parsed = field(default_factory=Parsed)
+
     #: Informational windows; rent steps and free rent stay manual review.
     new_lease_days: Parsed = field(default_factory=Parsed)
     new_lease_ig_days: Parsed = field(default_factory=Parsed)

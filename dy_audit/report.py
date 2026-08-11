@@ -102,17 +102,6 @@ def _summary_sheet(sheet, result: LoanResult, run_date: dt.date) -> None:
     sheet.cell(row=row, column=2).fill = _HEADER_FILL
     row += 1
     row = _write_row(sheet, row, "Debt yield (NCF / UPB)", facts.get("debt_yield"), "0.0000%")
-    covenant = facts.get("covenant")
-    if covenant is None:
-        row = _write_row(
-            sheet, row, "Covenant threshold", "not stated in this workbook - confirm from loan docs"
-        )
-    else:
-        row = _write_row(sheet, row, "Covenant threshold", covenant, "0.0000%")
-        dy = facts.get("debt_yield")
-        verdict = "n/a" if dy is None else ("PASS" if dy >= covenant else "FAIL")
-        row = _write_row(sheet, row, "Covenant result", verdict)
-        row = _write_row(sheet, row, "Threshold source", facts.get("covenant_source"))
     row = _write_row(sheet, row, "Net cash flow (NCF)", facts.get("ncf"), "#,##0.00")
     row = _write_row(sheet, row, "Net operating income", facts.get("noi"), "#,##0.00")
     row = _write_row(sheet, row, "Effective gross income", facts.get("egi"), "#,##0.00")
@@ -221,6 +210,8 @@ def _parameters_sheet(sheet, result: LoanResult) -> None:
         ("Base stated in agreement", params.mgmt_stated_base),
         ("Base actually enforced", None),
         ("Delinquency window", params.delinquency),
+        ("Other income window (months)", params.other_income_months),
+        ("Concessions window (months)", params.concession_months),
         ("New-lease occupancy window", params.new_lease_days),
         ("New-lease window, investment grade", params.new_lease_ig_days),
         ("Rent-step window", params.rent_step_window),

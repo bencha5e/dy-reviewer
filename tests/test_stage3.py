@@ -153,6 +153,43 @@ def test_management_fee_is_tested_against_egi(results, loan):
     assert _status(results, loan, "CHK_MGMT_BASE") is PASS
 
 
+# -- other-income basis ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "loan,other,concessions",
+    [
+        ("Strada", 3, 6),
+        ("Campus at Villa La Jolla", 12, None),
+        ("Hialeah", 12, None),
+        ("Ares55thAve", 12, None),
+    ],
+)
+def test_other_income_windows_are_read_from_the_agreement(contexts, loan, other, concessions):
+    # The agreements write the count as a word ("trailing three-month"), a
+    # numeral ("12-month"), or both ("twelve (12) month").
+    params = contexts[loan].params
+    assert params.other_income_months.value == other
+    assert params.concession_months.value == concessions
+
+
+@pytest.mark.parametrize("loan", LOANS)
+def test_other_income_basis_is_verified_not_deferred(results, loan):
+    assert _status(results, loan, "CHK_OTHER_INCOME_BASIS") is PASS
+
+
+def test_strada_short_windows_are_proved_from_the_annualisation_factors(results):
+    # Strada is the only loan not on a trailing twelve. Its agreement puts other
+    # income on T3 and concessions on T6, and the operating statement annualises
+    # exactly those: SUM(L20:N20)*4 is three months, SUM(I21:N21)*2 is six.
+    # Reaching them means stepping through SUM(R52:R53), so the dependency walk
+    # has to expand that range.
+    finding = _findings(results, "Strada", "CHK_OTHER_INCOME_BASIS")[0]
+    assert finding.status is PASS
+    assert "3 months from" in finding.evidence and "6 months from" in finding.evidence
+    assert "*4" in finding.evidence and "*2" in finding.evidence
+
+
 def test_nearby_label_prefers_the_adjacent_column(contexts):
     # Strada's operating statement labels R54 from Q54 ("Delinquent Rents") while
     # B54 holds an unrelated "UTILITIES" heading on the same row.

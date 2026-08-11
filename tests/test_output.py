@@ -12,7 +12,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from dy_audit.audit import audit_loan, find_covenant_threshold
+from dy_audit.audit import audit_loan
 from dy_audit.cli import run
 from dy_audit.context import LoanContext
 from dy_audit.definitions import parse_definitions
@@ -73,43 +73,6 @@ def test_a_broken_workbook_fails_only_its_own_loan(input_copy):
         assert results[other].succeeded
 
 
-# -- covenant threshold -------------------------------------------------------
-
-
-def test_only_ares_states_a_covenant_threshold():
-    # The OSAR's own columns E-G hold prior and at-contribution debt yields.
-    # Reading one of those as a covenant would give a confident, wrong verdict,
-    # so a threshold must be a labelled literal on another tab.
-    from tests.conftest import REPO_ROOT
-
-    pairs, _ = discover(REPO_ROOT)
-    for pair in pairs:
-        with Workbook(pair.xlsx_path) as wb:
-            ctx = LoanContext(
-                files=pair,
-                wb=wb,
-                tab=select_osar(wb),
-                params=parse_definitions(pair.defs_path, pair.loan_name),
-            )
-            threshold = find_covenant_threshold(ctx)
-            if pair.loan_name == "Ares55thAve":
-                assert threshold is not None
-                assert threshold[0] == pytest.approx(0.065)
-                assert "Debt Service!C14" in threshold[1]
-            else:
-                assert threshold is None, f"{pair.loan_name} should state no covenant"
-
-
-def test_covenant_finding_reports_pass_and_absence(audited):
-    ares = [f for f in audited["Ares55thAve"].findings if f.check_id == "CHK_COVENANT"]
-    assert len(ares) == 1 and ares[0].status is Status.PASS
-    assert "clears" in ares[0].message
-
-    strada = [f for f in audited["Strada"].findings if f.check_id == "CHK_COVENANT"]
-    assert len(strada) == 1 and strada[0].status is Status.MANUAL_REVIEW
-    assert "No covenant threshold is stated" in strada[0].message
-
-
 # -- findings workbook --------------------------------------------------------
 
 
@@ -153,7 +116,7 @@ def test_manual_review_is_visually_distinct_from_pass(workbook_for):
     assert fills["FLAG"] != fills["PASS"]
 
 
-def test_summary_reports_the_dy_upb_and_covenant(workbook_for):
+def test_summary_reports_the_dy_and_upb(workbook_for):
     wb, _ = workbook_for("Ares55thAve")
     labels = {}
     sheet = wb["Summary"]
@@ -162,8 +125,10 @@ def test_summary_reports_the_dy_upb_and_covenant(workbook_for):
         if key:
             labels[key] = sheet.cell(row=row, column=2).value
     assert labels["Debt yield (NCF / UPB)"] == pytest.approx(0.07088346216872761)
-    assert labels["Covenant threshold"] == pytest.approx(0.065)
-    assert labels["Covenant result"] == "PASS"
+    # No covenant comparison: whether the loan clears its threshold is decided in
+    # a separate workflow. This tool only establishes that the DY is correct.
+    assert "Covenant threshold" not in labels
+    assert "Covenant result" not in labels
     assert labels["UPB used"] == pytest.approx(10_409_000)
     assert labels["UPB cell"] == "Comm OSAR!D6"
     assert "confirm against internal records" in labels["UPB is echoed, not verified"]

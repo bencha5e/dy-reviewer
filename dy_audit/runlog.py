@@ -50,25 +50,20 @@ def build_summary(
     lines.append("")
 
     if succeeded:
-        lines += ["## Loans reviewed", "", "| Loan | Debt yield | Covenant | Blockers | High | Needs review |", "|---|---:|---|---:|---:|---:|"]
+        lines += [
+            "## Loans reviewed",
+            "",
+            "| Loan | Debt yield | Blockers | High | Needs review |",
+            "|---|---:|---:|---:|---:|",
+        ]
         for result in sorted(succeeded, key=lambda r: r.loan_name):
-            facts = result.facts
-            dy = facts.get("debt_yield")
-            covenant = facts.get("covenant")
-            if covenant is None:
-                verdict = "not stated"
-            elif dy is None:
-                verdict = "n/a"
-            else:
-                verdict = "PASS" if dy >= covenant else "FAIL"
+            dy = result.facts.get("debt_yield")
             counts = result.count_by_severity()
             review = sum(1 for f in result.findings if f.status is Status.MANUAL_REVIEW)
+            yield_text = f"{dy:.4%}" if dy is not None else "not read"
             lines.append(
-                f"| {result.loan_name} | {dy:.4%} | {verdict} | "
-                f"{counts.get(Severity.BLOCKER, 0)} | {counts.get(Severity.HIGH, 0)} | {review} |"
-                if dy is not None
-                else f"| {result.loan_name} | not read | {verdict} | "
-                f"{counts.get(Severity.BLOCKER, 0)} | {counts.get(Severity.HIGH, 0)} | {review} |"
+                f"| {result.loan_name} | {yield_text} | {counts.get(Severity.BLOCKER, 0)} | "
+                f"{counts.get(Severity.HIGH, 0)} | {review} |"
             )
         lines.append("")
 

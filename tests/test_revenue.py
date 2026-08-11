@@ -119,7 +119,7 @@ def test_memorial_export_total_ties_on_the_occupied_basis(revenue):
 def test_quincy_backfilled_rent_cells_flag(revenue):
     flags = [
         f
-        for f in _findings(revenue, "Quincy Hollingsworth", "CHK_RENT_EDITS")
+        for f in _findings(revenue, "Quincy and Hollingsworth", "CHK_RENT_EDITS")
         if f.status is FLAG
     ]
     assert len(flags) == 1
@@ -132,7 +132,7 @@ def test_quincy_backfilled_rent_cells_flag(revenue):
 def test_quincy_export_totals_no_longer_tie(revenue):
     flags = [
         f
-        for f in _findings(revenue, "Quincy Hollingsworth", "CHK_RR_TOTAL_TIE")
+        for f in _findings(revenue, "Quincy and Hollingsworth", "CHK_RR_TOTAL_TIE")
         if f.status is FLAG
     ]
     assert len(flags) == 1
@@ -140,7 +140,7 @@ def test_quincy_export_totals_no_longer_tie(revenue):
     # The commercial schedule's totals still tie and must stay a PASS.
     passes = [
         f
-        for f in _findings(revenue, "Quincy Hollingsworth", "CHK_RR_TOTAL_TIE")
+        for f in _findings(revenue, "Quincy and Hollingsworth", "CHK_RR_TOTAL_TIE")
         if f.status is PASS
     ]
     assert passes and passes[0].sheet == "Rent Roll (COMM)"
@@ -149,7 +149,7 @@ def test_quincy_export_totals_no_longer_tie(revenue):
 def test_quincy_note_claims_exclusions_the_formula_never_applies(revenue):
     rebuild = next(
         rb
-        for rb in revenue["Quincy Hollingsworth"].facts["rebuilds"]
+        for rb in revenue["Quincy and Hollingsworth"].facts["rebuilds"]
         if rb.line is Line.GPR
     )
     items = [item for item, _amt in rebuild.reconciliation]
@@ -162,13 +162,13 @@ def test_quincy_commercial_base_rent_rebuild_ties(revenue):
     # Total row belongs to the Parking line and must not leak in.
     base = [
         f
-        for f in _findings(revenue, "Quincy Hollingsworth", "CHK_RENT_REBUILD")
+        for f in _findings(revenue, "Quincy and Hollingsworth", "CHK_RENT_REBUILD")
         if "BASE_RENT" in f.message
     ]
     assert len(base) == 1 and base[0].status is PASS
     comm = next(
         rb
-        for rb in revenue["Quincy Hollingsworth"].facts["rebuilds"]
+        for rb in revenue["Quincy and Hollingsworth"].facts["rebuilds"]
         if rb.line is Line.BASE_RENT
     )
     assert comm.annualized() == pytest.approx(2_774_713.44)
@@ -178,7 +178,7 @@ def test_quincy_inert_vacancy_formula_is_a_blocker(revenue):
     # `IF((1-N16)>N15,...)` tests a blank cell instead of occupancy, so the
     # line returns 0 at every substituted occupancy. Whichever branch words
     # it, it must be a blocker-severity flag showing the zero-everywhere test.
-    finding = _one(revenue, "Quincy Hollingsworth", "CHK_VACANCY_SIGN")
+    finding = _one(revenue, "Quincy and Hollingsworth", "CHK_VACANCY_SIGN")
     assert finding.status is FLAG
     assert finding.severity is Severity.BLOCKER
     assert "100.00% -> 0.00" in finding.evidence or "does not depend on occupancy" in finding.message
@@ -187,16 +187,16 @@ def test_quincy_inert_vacancy_formula_is_a_blocker(revenue):
 def test_quincy_gpr_recompute_handles_the_two_block_sum(revenue):
     # SUM(H401:H475,H9:H388) is one tenant column split in two; the recompute
     # must union the slices instead of scoring them separately.
-    assert _one(revenue, "Quincy Hollingsworth", "CHK_GPR_RECOMPUTE").status is PASS
+    assert _one(revenue, "Quincy and Hollingsworth", "CHK_GPR_RECOMPUTE").status is PASS
 
 
 # -- Hialeah corrected variant -------------------------------------------------
 
 
 def test_corrected_hialeah_rebuild_ties(revenue):
-    finding = _one(revenue, "Hialeah", "CHK_RENT_REBUILD")
+    finding = _one(revenue, "Hialeah Infill Industrial Park", "CHK_RENT_REBUILD")
     assert finding.status is PASS
-    rebuild = revenue["Hialeah"].facts["rebuilds"][0]
+    rebuild = revenue["Hialeah Infill Industrial Park"].facts["rebuilds"][0]
     assert rebuild.annualized() == pytest.approx(1_436_451.96)
 
 

@@ -33,22 +33,30 @@ SPEC_TABLE = {
 _NOSENT = r"(?:[^.]|\.(?=\d))"
 
 #: `(y) 5.00%` / `(y) five percent (5.0%)` / `(y) 5%` after "vacancy factor".
+#: Quincy writes "a vacancy/credit loss factor of the greater of (x) actual
+#: vacancy or (y) 3.0%"; on a mixed-use loan the residential floor is stated
+#: first and governs the GPR line, so the first match wins.
 _VACANCY_FLOOR = re.compile(
-    rf"vacancy factor{_NOSENT}{{0,200}}?\(y\)\s*(?:[\w\s-]*?\(\s*)?(\d+(?:\.\d+)?)\s*%",
+    rf"vacancy(?:\s*/\s*credit\s+loss)?\s+factor{_NOSENT}{{0,200}}?"
+    rf"\(y\)\s*(?:[\w\s-]*?\(\s*)?(\d+(?:\.\d+)?)\s*%",
     re.IGNORECASE,
 )
 _IG_CARVEOUT = re.compile(
     rf"vacancy factor{_NOSENT}{{0,300}}?\(\s*excluding\s+investment\s+grade", re.IGNORECASE
 )
 
-#: `$250 per unit`, `$0.25 per square foot`, `$0.10 per square feet`.
+#: `$250 per unit`, `$0.25 per square foot`, `$250 per residential unit`.
 _RESERVE = re.compile(
-    r"\$\s*([\d,]+(?:\.\d+)?)\s*per\s+(unit|square\s*(?:foot|feet|ft))", re.IGNORECASE
+    r"\$\s*([\d,]+(?:\.\d+)?)\s*per\s+(?:residential\s+|leasable\s+)?"
+    r"(unit|square\s*(?:foot|feet|ft))",
+    re.IGNORECASE,
 )
 
-#: `3.00% of Gross Revenues`, `(3.0%) of Gross Revenue`, `3.0% of gross operating income`.
+#: `3.00% of Gross Revenues`, `(3.0%) of Gross Revenue`, `3.0% of gross operating
+#: income`, `2.5% of effective gross income`.
 _MGMT_FEE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*%\s*\)?\s*of\s+(gross\s+\w+(?:\s+\w+)?)", re.IGNORECASE
+    r"(\d+(?:\.\d+)?)\s*%\s*\)?\s*of\s+((?:effective\s+)?gross\s+\w+(?:\s+\w+)?)",
+    re.IGNORECASE,
 )
 
 #: `more than forty-five (45) days delinquent` - the number word may be hyphenated.
@@ -57,6 +65,10 @@ _DELINQ_NUMBERED = re.compile(
 )
 #: `60-days past due`, `60 days past due`.
 _DELINQ_PAST_DUE = re.compile(r"(\d+)\s*-?\s*days?\s+past\s+due", re.IGNORECASE)
+#: Quincy: `tenants delinquent beyond forty-five (45) days`.
+_DELINQ_BEYOND = re.compile(
+    r"delinquent beyond\s+[\w\s()-]{0,40}?\((\d+)\)\s*days?", re.IGNORECASE
+)
 #: Strada: no day count at all, only a requirement to be current.
 _DELINQ_CURRENT = re.compile(r"current on their rental obligations", re.IGNORECASE)
 
@@ -79,9 +91,11 @@ _OTHER_INCOME_MONTHS = re.compile(
     rf"other income based on the most recent)\s+{_MONTH_FRAGMENT}",
     re.IGNORECASE,
 )
-#: "concessions based on a trailing six-month actual total, annualized" (Strada).
+#: "concessions based on a trailing six-month actual total" (Strada) or
+#: "concessions offered based on the trailing 6 months" (Quincy).
 _CONCESSION_MONTHS = re.compile(
-    rf"concessions based on a trailing\s+{_MONTH_FRAGMENT}", re.IGNORECASE
+    rf"concessions\s+(?:offered\s+)?based on (?:a|the) trailing\s+{_MONTH_FRAGMENT}",
+    re.IGNORECASE,
 )
 
 _NEW_LEASE = re.compile(
@@ -158,9 +172,14 @@ def parse_definitions(path: Path, loan_name: str) -> LoanParams:
         params.mgmt_fee_pct = Parsed(float(m.group(1)) / 100.0, _quote(m))
         params.mgmt_stated_base = Parsed(m.group(2).strip(), _quote(m))
 
+    # An explicit day count wins over the bare "current on their rental
+    # obligations" requirement: Quincy states both, and the 45-day clause is
+    # the delinquency exclusion the model must apply.
     if m := _DELINQ_NUMBERED.search(text):
         params.delinquency = Parsed(int(m.group(1)), _quote(m))
     elif m := _DELINQ_PAST_DUE.search(text):
+        params.delinquency = Parsed(int(m.group(1)), _quote(m))
+    elif m := _DELINQ_BEYOND.search(text):
         params.delinquency = Parsed(int(m.group(1)), _quote(m))
     elif m := _DELINQ_CURRENT.search(text):
         params.delinquency = Parsed(CURRENT, _quote(m))

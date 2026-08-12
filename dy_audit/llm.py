@@ -234,16 +234,19 @@ _FINDING_SCHEMA: dict[str, Any] = {
             ),
         },
         "clause": {
-            "type": ["string", "null"],
-            "description": "Verbatim words from the definition being relied on.",
+            "type": "string",
+            "description": (
+                "Verbatim words from the definition being relied on. Empty "
+                "string when the finding rests on no clause."
+            ),
         },
         "finding": {"type": "string", "description": "What is wrong, in plain sentences."},
         "impact_annualized": {
             "type": ["number", "null"],
             "description": "Dollar effect for a full year; null when not quantifiable.",
         },
-        "evidence": {"type": ["string", "null"]},
-        "recommendation": {"type": ["string", "null"]},
+        "evidence": {"type": "string", "description": "Empty string when none."},
+        "recommendation": {"type": "string", "description": "Empty string when none."},
     },
     "required": [
         "id",
@@ -266,8 +269,11 @@ REVENUE_FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "loan": {"type": "string"},
-        "test_date": {"type": ["string", "null"]},
-        "osar_tab": {"type": ["string", "null"]},
+        "test_date": {"type": "string", "description": "Empty string when not stated."},
+        "osar_tab": {
+            "type": "string",
+            "description": "Empty string when the tab could not be identified.",
+        },
         "term_sheet": _TERM_SHEET_SCHEMA,
         "rebuild": _REBUILD_SCHEMA,
         "findings": {"type": "array", "items": _FINDING_SCHEMA},
@@ -575,11 +581,32 @@ def extract_payload(content: Any) -> dict:
             except json.JSONDecodeError:
                 continue
             if isinstance(payload, dict) and "findings" in payload:
-                return payload
+                return _restore_nulls(payload)
     raise ValueError(
         "The revenue review returned no parseable findings object. "
         f"Text blocks received: {len(candidates)}."
     )
+
+
+#: The API caps a schema at 16 union-typed (nullable) parameters. The term
+#: sheet and rebuild keep theirs - null is a semantically loaded answer there,
+#: and numbers have no other way to say "none" - so these string fields carry
+#: "" on the wire instead, translated back to None here so nothing downstream
+#: sees a different payload than before.
+_EMPTY_MEANS_NULL = ("test_date", "osar_tab")
+_EMPTY_MEANS_NULL_FINDING = ("clause", "evidence", "recommendation")
+
+
+def _restore_nulls(payload: dict) -> dict:
+    for key in _EMPTY_MEANS_NULL:
+        if payload.get(key) == "":
+            payload[key] = None
+    for item in payload.get("findings") or []:
+        if isinstance(item, dict):
+            for key in _EMPTY_MEANS_NULL_FINDING:
+                if item.get(key) == "":
+                    item[key] = None
+    return payload
 
 
 def _coerce(value: Any, enum: Any, default: Any) -> Any:
